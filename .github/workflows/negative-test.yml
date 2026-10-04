@@ -1,0 +1,143 @@
+# Images that admission and scripts/verify.sh must reject (SPEC §7.1).
+# Pushed as ghcr.io/stefanaki/slsa-l3-reference/orders-api:negative-<case>-<shortsha>.
+# Dispatch from main only: the self-attested signer SAN is then negative-test.yml@refs/heads/main,
+# which `scripts/verify.sh negatives <shortsha>` checks for.
+name: negative-test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/stefanaki/slsa-l3-reference/orders-api
+
+jobs:
+  # Built and pushed with no attestation of any kind. Expected rejection: no attestation.
+  unsigned:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: tag
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # build-push-action adds BuildKit provenance by default; turn every record off.
+      # The case label keeps this digest distinct from the self-attested image built from the same commit.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: apps/orders-api
+          platforms: linux/amd64
+          build-args: VERSION=0.0.0-negative-unsigned
+          labels: dev.slsa-l3-reference.negative-case=unsigned
+          secrets: nuget_token=${{ secrets.NUGET_READ_TOKEN }}
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE }}:negative-unsigned-${{ steps.tag.outputs.short }}
+          push: true
+          no-cache: true
+
+  # The caller builds and attests itself, bypassing the platform. Provenance and SBOM are both
+  # attested, so the signer (negative-test.yml, not platform-docker.yml@<approved-sha>) is what fails.
+  # Build and signing stay in separate jobs (SPEC §2 rule 6): the Dockerfile never sees id-token.
+  self-attested-build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: tag
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: apps/orders-api
+          platforms: linux/amd64
+          build-args: VERSION=0.0.0-negative-self-attested
+          labels: dev.slsa-l3-reference.negative-case=self-attested
+          secrets: nuget_token=${{ secrets.NUGET_READ_TOKEN }}
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE }}:negative-self-attested-${{ steps.tag.outputs.short }}
+          push: true
+          no-cache: true
+
+  self-attested:
+    needs: self-attested-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.74.0
+          cache: false
+
+      - name: SBOM (CycloneDX)
+        env:
+          REF: ${{ env.IMAGE }}@${{ needs.self-attested-build.outputs.digest }}
+        run: trivy image --format cyclonedx --output sbom.cdx.json "$REF"
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ needs.self-attested-build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ needs.self-attested-build.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+          create-storage-record: false
