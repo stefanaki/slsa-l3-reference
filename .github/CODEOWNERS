@@ -1,0 +1,5 @@
+# Build platform ("org") ownership (SPEC §2, §8.2). Documented, not enforced: a solo maintainer
+# can't approve their own PR. A real org requires review from these owners.
+/.github/workflows/platform-*.yml  @stefanaki
+/.github/CODEOWNERS                @stefanaki
+/.github/renovate.json             @stefanaki

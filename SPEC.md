@@ -213,14 +213,14 @@ Same event matrix as §5.1: PRs only build, `main` attests and uploads workflow 
 `release-orders-api.yml`:
 ```yaml
 on:
-  pull_request:
-    paths: ["apps/orders-api/**"]
+  pull_request:               # no paths filter: required checks must report on every PR (§8.2)
   push:
     branches: [main]
     paths: ["apps/orders-api/**"]
     tags: ["apps/orders-api/v*"]
 jobs:
   test:                       # required status check (§8.2); no id-token
+    name: test (orders-api)   # check names must be unique across workflows
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     permissions: { contents: read }
@@ -229,12 +229,11 @@ jobs:
       - run: docker buildx build --secret id=nuget_token,env=NUGET_TOKEN --target test apps/orders-api
         env: { NUGET_TOKEN: "${{ secrets.NUGET_READ_TOKEN }}" }
   release:
+    name: release (orders-api) # checks: release (orders-api) / build, / scan, / attest
     permissions: { contents: read, packages: write, id-token: write, attestations: write }
     uses: stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<sha> # platform/vX.Y.Z
     with:
       app: orders-api
-      build-args: |
-        DOTNET_CONFIGURATION=Release
     secrets:
       build-secrets: |
         nuget_token=${{ secrets.NUGET_READ_TOKEN }}
@@ -273,7 +272,8 @@ Renovate GitHub App on this public repo.
 
 ### 8.2 Rulesets and settings (documented in `docs/rulesets.md`; configured by hand)
 1. **`main`:** require a PR with **0 required approvals** and **squash merge as the only allowed merge method** (also disable merge commits and rebase merging in the repo settings), require status checks (the projects' `test` jobs and the platform PR-mode builds) with **branches up to date before merging**, block force pushes and deletion. With squash-only and up-to-date branches, the commit that lands on `main` has the same tree the checks ran on; merge commits or rebases would add untested intermediate commits to `main` (§2 rule 7).
-   - Required checks and `paths` filters interact: a PR that doesn't trigger a workflow never reports its check. Task 06/08 must handle this (e.g. no `paths` filter on `pull_request`, or an always-reporting aggregate job).
+   - Rulesets match required checks by name only, so check names are unique per app: `test (<app>)` and `release (<app>) / build` (the platform's PR-mode build).
+   - Required checks and `paths` filters interact: a PR that doesn't trigger a workflow never reports its check, and the PR stays blocked. So callers have **no `paths` filter on `pull_request`**: every PR runs every app's `test` job and platform PR build. `push` to `main` keeps its `paths` filter; tag pushes ignore `paths` filters.
    - CODEOWNERS documents platform ownership but isn't enforced: a solo maintainer can't approve their own PR.
    - `rulesets.md` explains that a real org requires CODEOWNERS review by a second person.
 2. **`apps/*/v*` tags:** restrict creation, update and deletion to the owner. This controls who can cut a release that admission will accept.

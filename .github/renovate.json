@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests", "docker:pinDigests"],
+  "packageRules": [
+    {
+      "description": "Platform self-references (SPEC §2 rule 1): bump the SHA and comment to the newest platform/vX.Y.Z tag, reviewed on its own.",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["workflow"],
+      "matchDepNames": ["stefanaki/slsa-l3-reference"],
+      "overrideDatasource": "github-tags",
+      "versioning": "regex:^platform/v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "groupName": "build platform",
+      "separateMajorMinor": false
+    },
+    {
+      "description": "The GitHub Packages feed in nuget.config hosts no packages and Renovate has no credentials for it (SPEC §8.1).",
+      "matchManagers": ["nuget"],
+      "registryUrls": ["https://api.nuget.org/v3/index.json"]
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+# Project caller for inventory (SPEC §7). Declares what to build; the pinned platform decides how.
+# Pins the platform by commit SHA (SPEC §2 rule 1); Renovate bumps the SHA and tag comment on new platform/v* tags.
+name: release-inventory
+
+on:
+  # No paths filter: the test and platform PR-build checks are required and must report on every PR (§8.2).
+  pull_request:
+  push:
+    branches: [main]
+    paths: ["apps/inventory/**"]
+    tags: ["apps/inventory/v*"]
+
+permissions: {}
+
+jobs:
+  # Required status check (§8.2). Project-owned, never signs.
+  # Check names must be unique across workflows: rulesets match required checks by name only.
+  test:
+    name: test (inventory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/inventory
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/inventory/go.mod
+          cache: false
+      - run: go test ./...
+
+  release:
+    name: release (inventory)  # platform checks report as "release (inventory) / build" etc.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: stefanaki/slsa-l3-reference/.github/workflows/platform-go.yml@f15d9bcb086403847304ae2c441218ccbc4fe198 # platform/v1.0.0
+    with:
+      app: inventory

@@ -1,0 +1,46 @@
+# Project caller for orders-api (SPEC §7). Declares what to build; the pinned platform decides how.
+# Pins the platform by commit SHA (SPEC §2 rule 1); Renovate bumps the SHA and tag comment on new platform/v* tags.
+# Fork PRs get no secrets, so the test job and the platform PR build fail for them (nuget_token is required).
+name: release-orders-api
+
+on:
+  # No paths filter: the test and platform PR-build checks are required and must report on every PR (§8.2).
+  pull_request:
+  push:
+    branches: [main]
+    paths: ["apps/orders-api/**"]
+    tags: ["apps/orders-api/v*"]
+
+permissions: {}
+
+jobs:
+  # Required status check (§8.2). Project-owned, never signs.
+  # Check names must be unique across workflows: rulesets match required checks by name only.
+  test:
+    name: test (orders-api)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          NUGET_TOKEN: ${{ secrets.NUGET_READ_TOKEN }}
+        run: docker buildx build --secret id=nuget_token,env=NUGET_TOKEN --target test apps/orders-api
+
+  release:
+    name: release (orders-api)  # platform checks report as "release (orders-api) / build" etc.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@f15d9bcb086403847304ae2c441218ccbc4fe198 # platform/v1.0.0
+    with:
+      app: orders-api
+    secrets:
+      build-secrets: |
+        nuget_token=${{ secrets.NUGET_READ_TOKEN }}

@@ -1,0 +1,70 @@
+# Platform release → allowlist flow (SPEC §8.3). On a platform/vX.Y.Z tag, prints the signer
+# identities to add to the Kyverno allowlist in stefanaki/lab. Adding them stays manual.
+name: platform-release
+
+on:
+  push:
+    tags: ["platform/v*"]
+
+permissions: {}
+
+jobs:
+  summary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # Platform changes land on main through reviewed PRs; a tag elsewhere is not a release.
+      - name: Check tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$REF" =~ ^refs/tags/platform/v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::$REF is not refs/tags/platform/vX.Y.Z"; exit 1; }
+          # refs/heads/main, so a tag named "main" cannot shadow the branch.
+          status="$(gh api "repos/$REPO/compare/refs/heads/main...$SHA" --jq .status)"
+          case "$status" in
+            behind|identical) echo "$SHA is on main" ;;
+            *) echo "::error::platform tag commit $SHA is not on main (compare status: $status)"; exit 1 ;;
+          esac
+
+      - name: Write allowlist entry
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Platform release \`$TAG\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tag | \`$TAG\` |"
+            echo "| Commit | \`$SHA\` |"
+            echo
+            # Only platform-docker.yml signs images, so only it goes into the Kyverno allowlist (SPEC §9.3).
+            echo "Add this attestor entry to the signer allowlist in \`stefanaki/lab\` (SPEC §2 rule 3, §8.3, §9.3):"
+            echo
+            echo '```yaml'
+            echo "# $TAG"
+            echo "- keyless:"
+            echo "    issuer: https://token.actions.githubusercontent.com"
+            echo "    subject: https://github.com/$REPO/.github/workflows/platform-docker.yml@$SHA"
+            echo "    rekor:"
+            echo "      url: https://rekor.sigstore.dev"
+            echo '```'
+            echo
+            echo "Go binaries are not admitted by Kyverno. Verify them against this signer (SPEC §10):"
+            echo
+            echo '```'
+            echo "https://github.com/$REPO/.github/workflows/platform-go.yml@$SHA"
+            echo '```'
+            echo
+            echo "Callers pin \`$REPO/.github/workflows/<platform>.yml@$SHA # $TAG\`; Renovate opens that PR."
+          } >> "$GITHUB_STEP_SUMMARY"
