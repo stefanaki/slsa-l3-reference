@@ -1,0 +1,356 @@
+# Build platform for Go binaries (SPEC §6).
+# Callers pin this file by commit SHA. Signing happens only in the fixed-step `attest` job.
+name: platform-go
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: App name; binaries are named <app>_<os>_<arch>.
+        type: string
+        required: true
+      path:
+        description: Go module directory (contains go.mod), under apps/. Defaults to apps/<app>.
+        type: string
+        default: ""
+      targets:
+        description: Comma-separated os/arch list.
+        type: string
+        default: linux/amd64,linux/arm64,darwin/amd64,darwin/arm64
+    outputs:
+      mode:
+        description: pr, main or release.
+        value: ${{ jobs.build.outputs.mode }}
+      version:
+        description: Version stamped into the binaries (X.Y.Z, 0.0.0-main-<sha>, 0.0.0-pr-<n>).
+        value: ${{ jobs.build.outputs.version }}
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      binaries: ${{ steps.plan.outputs.binaries }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      checksums-sha256: ${{ steps.build.outputs.checksums-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      # Validates inputs and derives the mode from the caller's event and ref, never from inputs.
+      - id: plan
+        env:
+          APP: ${{ inputs.app }}
+          MODULE_PATH: ${{ inputs.path }}
+          TARGETS: ${{ inputs.targets }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [[ "$APP" =~ ^[a-z0-9-]+$ ]] || fail "app must match ^[a-z0-9-]+\$"
+          [[ "$TARGETS" =~ ^[a-z0-9]+/[a-z0-9]+(,[a-z0-9]+/[a-z0-9]+)*$ ]] \
+            || fail "targets must be a comma-separated os/arch list"
+          declare -A seen=()
+          binaries=""
+          IFS=, read -ra targets <<< "$TARGETS"
+          for target in "${targets[@]}"; do
+            [[ -z "${seen[$target]:-}" ]] || fail "duplicate target $target"
+            seen[$target]=1
+            binaries+="${binaries:+,}${APP}_${target%/*}_${target#*/}"
+          done
+
+          ws="$(realpath "$GITHUB_WORKSPACE")"
+          path="$(realpath -m "$ws/${MODULE_PATH:-apps/$APP}")"
+          [[ "$path" == "$ws/apps/"* ]] || fail "path must be under apps/"
+          [[ -f "$path/go.mod" ]] || fail "path ${path#"$ws/"} has no go.mod"
+          path="${path#"$ws/"}"
+          # Values are written to GITHUB_OUTPUT: no newlines or other special characters.
+          [[ "$path" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "path contains unsupported characters"
+
+          short="${SHA:0:7}"
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            mode=pr; tag=""; version="0.0.0-pr-$PR_NUMBER"
+          elif [[ "$EVENT_NAME" == push && "$REF" == refs/heads/main ]]; then
+            mode=main; tag=""; version="0.0.0-main-$short"
+          elif [[ "$EVENT_NAME" == push && "$REF" =~ ^refs/tags/apps/([a-z0-9-]+)/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            [[ "${BASH_REMATCH[1]}" == "$APP" ]] || fail "tag $REF is not for app $APP"
+            mode=release; tag="${REF#refs/tags/}"; version="${REF##*/v}"
+          else
+            fail "unsupported trigger: event=$EVENT_NAME ref=$REF"
+          fi
+          [[ "$version" =~ ^[0-9a-z.-]+$ ]] || fail "unexpected version $version"
+
+          # Values derived from the trigger go last, so nothing written before them can override them.
+          {
+            echo "path=$path"
+            echo "binaries=$binaries"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode=$mode version=$version binaries=$binaries"
+
+      # Tests are a required PR check (SPEC §2 rule 7), so only commits on main may be released.
+      - name: Check release commit is on main
+        if: steps.plan.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # refs/heads/main, so a tag named "main" cannot shadow the branch.
+          status="$(gh api "repos/$REPO/compare/refs/heads/main...$SHA" --jq .status)"
+          case "$status" in
+            behind|identical) echo "$SHA is on main" ;;
+            *) echo "::error::release tag commit $SHA is not on main (compare status: $status)"; exit 1 ;;
+          esac
+
+      # No cache: any workflow on main can write the module and build caches.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ steps.plan.outputs.path }}/go.mod
+          cache: false
+
+      # Same flags as apps/<app>/build.sh. Output stays outside the checkout, or Go stamps vcs.modified=true.
+      # Go ignores SOURCE_DATE_EPOCH; vcs.time comes from the commit.
+      - id: build
+        working-directory: ${{ steps.plan.outputs.path }}
+        env:
+          APP: ${{ inputs.app }}
+          TARGETS: ${{ inputs.targets }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/dist"
+          mkdir -p "$out"
+          supported="$(go tool dist list)"
+          IFS=, read -ra targets <<< "$TARGETS"
+          binaries=()
+          for target in "${targets[@]}"; do
+            grep -qxF "$target" <<< "$supported" || { echo "::error::unsupported target $target"; exit 1; }
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            bin="${APP}_${goos}_${goarch}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath \
+              -ldflags "-s -w -buildid= -X main.version=${VERSION}" \
+              -o "$out/$bin" .
+            go version -m "$out/$bin" | grep -qP '^\tbuild\tvcs.modified=false$' \
+              || { echo "::error::$bin is not stamped vcs.modified=false"; exit 1; }
+            binaries+=("$bin")
+          done
+          cd "$out"
+          sha256sum "${binaries[@]}" > checksums.txt
+          cat checksums.txt
+          echo "checksums-sha256=$(sha256sum checksums.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - id: upload
+        if: steps.plan.outputs.mode != 'pr'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-${{ inputs.app }}
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+
+  scan:
+    needs: build
+    if: needs.build.outputs.mode != 'pr'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      sbom-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sbom-sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      # By id, not name: a caller job could overwrite an artifact with the same name.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist
+
+      - name: Check binaries
+        env:
+          EXPECTED: ${{ needs.build.outputs.checksums-sha256 }}
+          BINARIES: ${{ needs.build.outputs.binaries }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::missing checksums hash"; exit 1; }
+          cd dist
+          echo "$EXPECTED  checksums.txt" | sha256sum --check --strict
+          sha256sum --check --strict checksums.txt
+          diff <(ls -A | sort) <({ tr , '\n' <<< "$BINARIES"; echo checksums.txt; } | sort)
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.74.0
+          # A cached binary could be planted by any workflow on main; always download.
+          cache: false
+
+      - name: SBOM (CycloneDX)
+        run: trivy rootfs --format cyclonedx --output sbom.cdx.json dist
+
+      - name: CVE gate (CRITICAL, fixed)
+        run: trivy rootfs --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 dist
+
+      - id: hash
+        run: echo "sha256=$(sha256sum sbom.cdx.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ inputs.app }}
+          path: sbom.cdx.json
+          if-no-files-found: error
+
+  # Fixed steps only: no checkout, no repo-defined commands.
+  attest:
+    needs: [build, scan]
+    if: needs.build.outputs.mode != 'pr' && needs.scan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.scan.outputs.sbom-artifact-id }}
+
+      - name: Check binaries and SBOM
+        env:
+          EXPECTED: ${{ needs.build.outputs.checksums-sha256 }}
+          EXPECTED_SBOM: ${{ needs.scan.outputs.sbom-sha256 }}
+          BINARIES: ${{ needs.build.outputs.binaries }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SBOM" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "::error::missing hash"; exit 1; }
+          echo "$EXPECTED_SBOM  sbom.cdx.json" | sha256sum --check --strict
+          cd dist
+          echo "$EXPECTED  checksums.txt" | sha256sum --check --strict
+          sha256sum --check --strict checksums.txt
+          diff <(ls -A | sort) <({ tr , '\n' <<< "$BINARIES"; echo checksums.txt; } | sort)
+
+      # One attestation each, with every binary as a subject (named by file name).
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ inputs.app }}_*
+
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ inputs.app }}_*
+          sbom-path: sbom.cdx.json
+
+      - name: Summary
+        env:
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          {
+            echo "### Attested binaries"
+            echo
+            echo '```'
+            cat dist/checksums.txt
+            echo '```'
+            echo
+            echo '```sh'
+            echo "gh attestation verify <binary> \\"
+            echo "  --repo $REPO \\"
+            echo "  --signer-workflow stefanaki/slsa-l3-reference/.github/workflows/platform-go.yml \\"
+            echo "  --signer-digest <approved platform sha> \\"
+            echo "  --source-ref $REF \\"
+            echo "  --predicate-type https://slsa.dev/provenance/v1"
+            echo '```'
+            echo
+            echo 'Repeat with `--predicate-type https://cyclonedx.org/bom` for the SBOM.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Publishes what attest signed. No id-token, no checkout.
+  release:
+    needs: [build, scan, attest]
+    if: needs.build.outputs.mode == 'release' && needs.attest.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.scan.outputs.sbom-artifact-id }}
+
+      - name: Check binaries and SBOM
+        env:
+          EXPECTED: ${{ needs.build.outputs.checksums-sha256 }}
+          EXPECTED_SBOM: ${{ needs.scan.outputs.sbom-sha256 }}
+          BINARIES: ${{ needs.build.outputs.binaries }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SBOM" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "::error::missing hash"; exit 1; }
+          echo "$EXPECTED_SBOM  sbom.cdx.json" | sha256sum --check --strict
+          cd dist
+          echo "$EXPECTED  checksums.txt" | sha256sum --check --strict
+          sha256sum --check --strict checksums.txt
+          diff <(ls -A | sort) <({ tr , '\n' <<< "$BINARIES"; echo checksums.txt; } | sort)
+
+      # Created once: draft, upload, publish. Published assets never change (immutable releases allow nothing else).
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          APP: ${{ inputs.app }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BINARIES: ${{ needs.build.outputs.binaries }}
+        run: |
+          set -euo pipefail
+          tag="${REF#refs/tags/}"
+          if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            [[ "$draft" == true ]] || { echo "::error::release $tag is already published"; exit 1; }
+            echo "Deleting draft left by an earlier run"
+            gh release delete "$tag" --yes
+          fi
+          IFS=, read -ra binaries <<< "$BINARIES"
+          gh release create "$tag" --verify-tag --draft \
+            --title "$APP v$VERSION" \
+            --notes "Binaries are attested (SLSA provenance and CycloneDX SBOM); see \`gh attestation verify\`."
+          files=("${binaries[@]/#/dist/}" dist/checksums.txt sbom.cdx.json)
+          gh release upload "$tag" "${files[@]}"
+
+          # Draft assets stay writable for any job with contents: write; check before and after publishing.
+          expected="$(for f in "${files[@]}"; do echo "$(basename "$f") sha256:$(sha256sum "$f" | cut -d' ' -f1)"; done | sort)"
+          check_assets() {
+            diff <(echo "$expected") <(gh release view "$tag" --json assets --jq '.assets[] | "\(.name) \(.digest)"' | sort) \
+              || { echo "::error::release $tag assets differ from the attested files ($1)"; exit 1; }
+          }
+          check_assets "draft"
+          gh release edit "$tag" --draft=false
+          check_assets "published"
