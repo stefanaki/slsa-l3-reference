@@ -1,0 +1,15 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: verify-orders-api-allowlist-negative
+# Own directory: two image-verifying policies in one test suite interfere with each other's results.
+policies:
+  - policy.yaml
+resources:
+  - resources.yaml
+results:
+  - policy: verify-orders-api
+    isImageValidatingPolicy: true
+    kind: Pod
+    resources: [slsa-sandbox/release-digest]
+    result: fail

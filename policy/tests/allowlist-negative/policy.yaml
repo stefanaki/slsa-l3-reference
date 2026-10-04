@@ -1,0 +1,99 @@
+# verify-orders-api.yaml with the real platform/v1.0.0 SHA left out of the allowlist (SPEC §7.1):
+# the genuine 1.0.0 release must then be rejected for the signer reason. Only that subject may differ
+# from the real policy; reasons.sh checks this.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-orders-api
+spec:
+  validationActions: [Deny]
+  # Fail closed, but only for Pods that use this repo's images (matchConditions below):
+  # a Kyverno outage never blocks other workloads.
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 30
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: [kube-system, flux-system, kyverno]
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        # Exactly this one rule: anything more turns off Kyverno's autogen for Deployments, Jobs etc.
+        # Known gap: ephemeral containers (kubectl debug, pods/ephemeralcontainers) aren't checked.
+        resources: ["pods"]
+  # Evaluated by the API server: the webhook isn't called for Pods without this repo's images.
+  matchConditions:
+    - name: uses-repo-image
+      expression: >-
+        (object.spec.containers
+          + (has(object.spec.initContainers) ? object.spec.initContainers : []))
+        .exists(c, c.image.startsWith('ghcr.io/stefanaki/slsa-l3-reference/'))
+  matchImageReferences:
+    - glob: "ghcr.io/stefanaki/slsa-l3-reference/*"
+  validationConfigurations:
+    mutateDigest: true
+    verifyDigest: true
+    required: true
+  attestors:
+    # Any workflow of this repo. Only tells "no attestation" apart from "wrong signer"; never admits on its own.
+    - name: anyRepoWorkflow
+      cosign:
+        keyless:
+          identities:
+            - issuer: https://token.actions.githubusercontent.com
+              subjectRegExp: ^https://github\.com/stefanaki/slsa-l3-reference/\.github/workflows/[^@]+@.+$
+        ctlog:
+          url: https://rekor.sigstore.dev
+    # The allowlist: one attestor per approved platform commit (SPEC §8.3), each with exactly one
+    # identity, the full certificate SAN. Add a new one to `approved` below too; removing both revokes it.
+    - name: platformV1_0_0 # a commit that is NOT the real platform/v1.0.0
+      cosign:
+        keyless:
+          identities:
+            - issuer: https://token.actions.githubusercontent.com
+              subject: https://github.com/stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@0000000000000000000000000000000000000000
+        ctlog:
+          url: https://rekor.sigstore.dev
+  attestations:
+    # Same predicate as `provenance`, but a separate entry so the two never share a verify-cache entry.
+    - name: anyProvenance
+      intoto:
+        type: https://slsa.dev/provenance/v1
+    - name: provenance
+      intoto:
+        type: https://slsa.dev/provenance/v1
+    - name: sbom
+      intoto:
+        type: https://cyclonedx.org/bom
+  variables:
+    # Every image of this repo in the Pod (or pod template): containers and initContainers.
+    - name: repoImages
+      expression: >-
+        (images.containers + images.initContainers)
+        .filter(i, i.startsWith('ghcr.io/stefanaki/slsa-l3-reference/'))
+    - name: approved
+      expression: "[attestors.platformV1_0_0]"
+  # Evaluated in order; the first failing check is the rejection reason.
+  # Keep the order: verified payloads are stored per predicate type for the whole request, so the
+  # source checks (4, 5) are safe only because check 2 runs just before them and replaces the
+  # provenance payload with what an approved platform commit signed.
+  validations:
+    - expression: >-
+        variables.repoImages.map(image, verifyAttestationSignatures(image, attestations.anyProvenance, [attestors.anyRepoWorkflow])).all(e, e > 0)
+      message: "no attestation: image has no provenance signed by a workflow of stefanaki/slsa-l3-reference"
+    - expression: >-
+        variables.repoImages.map(image, verifyAttestationSignatures(image, attestations.provenance, variables.approved)).all(e, e > 0)
+      message: "signer: provenance is not signed by an approved platform-docker.yml commit"
+    - expression: >-
+        variables.repoImages.map(image, verifyAttestationSignatures(image, attestations.sbom, variables.approved)).all(e, e > 0)
+      message: "signer: SBOM is not signed by an approved platform-docker.yml commit"
+    - expression: >-
+        variables.repoImages.map(image, extractPayload(image, attestations.provenance).predicate.buildDefinition.externalParameters.workflow.repository == 'https://github.com/stefanaki/slsa-l3-reference').all(e, e)
+      message: "source: not built from stefanaki/slsa-l3-reference"
+    - expression: >-
+        variables.repoImages.map(image, extractPayload(image, attestations.provenance).predicate.buildDefinition.externalParameters.workflow.ref.startsWith('refs/tags/apps/orders-api/v')).all(e, e)
+      message: "source: not built from an apps/orders-api/v* release tag"

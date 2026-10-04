@@ -1,0 +1,113 @@
+# Real GHCR images (tasks 09, 10). Digests, not tags, except release-tag.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: release-digest
+  namespace: slsa-sandbox
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:71a23e7ccda289f58b2835d0ed9ec898b7a5a56f4f7f5929d2eafee145c3432c
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: release-tag
+  namespace: slsa-sandbox
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api:1.0.0
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unsigned
+  namespace: slsa-sandbox
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:92ce94bd008cf1b0514b749306e6e36d76b39ca12025770e522d9fcc72ac69f3
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: self-attested
+  namespace: slsa-sandbox
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:ebdcdd88369f1931a49d28b5f3aaec98c34723f84ffa0e60d72263cefca05c51
+---
+# Built from main (orders-api:main-b328a8b) by the approved platform: right signer, wrong source ref.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: main-build
+  namespace: slsa-sandbox
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:15b1ba2001f953788a3a06df4a11447489bf8306755adabd2f41ca282d67eaef
+---
+# Release as an initContainer next to a third-party image: only this repo's images are checked.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: release-init
+  namespace: slsa-sandbox
+spec:
+  initContainers:
+    - name: init
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:71a23e7ccda289f58b2835d0ed9ec898b7a5a56f4f7f5929d2eafee145c3432c
+  containers:
+    - name: app
+      image: docker.io/library/busybox:1.37
+---
+# Unsigned image hidden in an initContainer next to the genuine release.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unsigned-init
+  namespace: slsa-sandbox
+spec:
+  initContainers:
+    - name: init
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:92ce94bd008cf1b0514b749306e6e36d76b39ca12025770e522d9fcc72ac69f3
+  containers:
+    - name: app
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:71a23e7ccda289f58b2835d0ed9ec898b7a5a56f4f7f5929d2eafee145c3432c
+---
+# Pod controllers are checked through Kyverno's autogen, so a bad Deployment is rejected up front.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deploy-release
+  namespace: slsa-sandbox
+spec:
+  selector:
+    matchLabels: {app: orders-api}
+  template:
+    metadata:
+      labels: {app: orders-api}
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:71a23e7ccda289f58b2835d0ed9ec898b7a5a56f4f7f5929d2eafee145c3432c
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deploy-unsigned
+  namespace: slsa-sandbox
+spec:
+  selector:
+    matchLabels: {app: orders-api}
+  template:
+    metadata:
+      labels: {app: orders-api}
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:92ce94bd008cf1b0514b749306e6e36d76b39ca12025770e522d9fcc72ac69f3

@@ -321,7 +321,7 @@ infrastructure/kabu/kyverno/
 apps/kabu/slsa-l3-reference/
   kustomization.yaml          # lists children
   policies/
-    verify-orders-api.yaml    # ClusterPolicy (§9.3)
+    verify-orders-api.yaml    # ImageValidatingPolicy (§9.3)
     kustomization.yaml
   orders-api/
     namespace.yaml            # ns slsa-l3-reference, PSS restricted
@@ -343,25 +343,28 @@ Ordering: `apps` already has `dependsOn: infrastructure` with `wait: true`, so K
 - Liveness and readiness probes on `/healthz`; small resource requests and limits.
 - **Digest updates:** Renovate in `stefanaki/lab` with the `kubernetes` manager enabled for `apps/kabu/slsa-l3-reference/**`. It opens PRs bumping `tag@digest` when new `X.Y.Z` tags appear in GHCR.
 
-### 9.3 Kyverno policy (`ClusterPolicy`, `Enforce`)
-- **Match:** Pods (and pod controllers) using `ghcr.io/stefanaki/slsa-l3-reference/*`, in any namespace except `kube-system`, `flux-system` and `kyverno`.
-- **`failurePolicy: Fail`**, scoped to this policy's images only. Other images aren't affected by a Kyverno outage.
-- `verifyImages` rule, `type: SigstoreBundle`, `mutateDigest: true`, `verifyDigest: true`, `required: true`.
-- **Attestors (the signer digest allowlist):** keyless, issuer `https://token.actions.githubusercontent.com`, Rekor `https://rekor.sigstore.dev`. **One entry per approved platform commit** (`count: 1`). The subject is the exact certificate SAN:
+### 9.3 Kyverno policy (`ImageValidatingPolicy`, `Deny`)
+- **API:** `policies.kyverno.io/v1` `ImageValidatingPolicy`. `ClusterPolicy` `verifyImages` also works in 1.19.x, but it is deprecated there and gives every rejection the same generic message.
+- **Match:** Pods (and, through Kyverno's autogen, pod controllers) using `ghcr.io/stefanaki/slsa-l3-reference/*` in any container or init container, in any namespace except `kube-system`, `flux-system` and `kyverno` (`namespaceSelector`). Other images in the same Pod aren't checked. Autogen requires the policy to match `pods` only, so ephemeral containers (`kubectl debug`, the `pods/ephemeralcontainers` subresource) are a known gap; that path needs RBAC only admins hold here.
+- **`failurePolicy: Fail`**, scoped to this repo's images by a webhook `matchConditions` on the Pod's container images: the API server doesn't call the webhook for other Pods, so they aren't affected by a Kyverno outage.
+- `mutateDigest: true`, `verifyDigest: true`, `required: true`. The mutating half resolves a bare tag and pins it to that digest; the validating half then verifies the digest and, on its own, rejects a bare tag.
+- **Attestors (the signer digest allowlist):** keyless, issuer `https://token.actions.githubusercontent.com`, Rekor `https://rekor.sigstore.dev`. **One attestor per approved platform commit**, each with exactly one identity (Kyverno 1.19 rejects several identities in one attestor), listed in the `approved` variable. The subject is the exact certificate SAN:
   ```
   https://github.com/stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<approved-sha>
   ```
-  Each entry carries a comment naming the `platform/vX.Y.Z` it corresponds to. Removing an entry revokes that platform version.
-- **Attestation 1: provenance** (`https://slsa.dev/provenance/v1`). Conditions:
-  - `buildDefinition.externalParameters.workflow.repository` == `https://github.com/stefanaki/slsa-l3-reference`
-  - `buildDefinition.externalParameters.workflow.ref` matches `refs/tags/apps/orders-api/v*`
-- **Attestation 2: SBOM** (`https://cyclonedx.org/bom`): must exist, from the same attestors.
-- **API choice:** `ClusterPolicy` `verifyImages` (where GitHub attestation support is documented). During implementation, check whether the CEL-based `ImageValidatingPolicy` in the pinned Kyverno version supports Sigstore bundles cleanly; switch if so.
+  Each attestor carries a comment naming the `platform/vX.Y.Z` it corresponds to. Removing it revokes that platform version.
+- **Validations, in order; the first failure is the rejection message.** The order is load-bearing: Kyverno stores verified payloads per predicate type for the whole request, so checks 4–5 read provenance only because check 2 has just replaced it with what an approved commit signed.
+  1. provenance signed by *any* workflow of this repo (a `subjectRegExp` attestor that never admits on its own) → else `no attestation: …`;
+  2. provenance (`https://slsa.dev/provenance/v1`) signed by an approved attestor → else `signer: …`;
+  3. SBOM (`https://cyclonedx.org/bom`) signed by an approved attestor → else `signer: …`;
+  4. `buildDefinition.externalParameters.workflow.repository` == `https://github.com/stefanaki/slsa-l3-reference` → else `source: …`;
+  5. `buildDefinition.externalParameters.workflow.ref` starts with `refs/tags/apps/orders-api/v` → else `source: …`.
+- **Cluster egress:** Kyverno fetches images and bundles from `ghcr.io` and the Sigstore trust root from `tuf-repo-cdn.sigstore.dev`. Task 12 confirms whether it also contacts Rekor.
 
 ### 9.4 Acceptance in cluster
 - The `orders-api` release image is admitted and served at `orders-slsa.gstefan.net/healthz`.
 - Each `negative-test` image (`unsigned`, `self-attested`) applied as a Pod in `slsa-sandbox` is **rejected** with a reason matching §7.1.
-- `kyverno test policy/tests` passes, including the allowlist-negative case (§7.1).
+- `kyverno test policy/tests` passes, including the allowlist-negative case (§7.1), and `policy/tests/reasons.sh` confirms each rejection message. The CLI runs only the validating half of an `ImageValidatingPolicy`, so the digest mutation below is checked only in the cluster.
 - A pod referencing the release image by tag only is mutated to `@sha256:…`.
 
 ---
@@ -467,9 +470,9 @@ Not used: `cosign` (`gh attestation verify` covers it), `act` (it can't get GitH
 
 ## 14. To verify during implementation (not design decisions)
 
-1. Kyverno `SigstoreBundle` finds GHCR-stored bundles (OCI referrers or tag-schema fallback) for `attest-build-provenance` / `attest-sbom` with `push-to-registry`.
-2. Kyverno keyless attestor subject matching works against the exact SAN with `@<sha>`. Using **multiple attestor entries** as the allowlist is the default design. If Kyverno supports variables there, an allowlist ConfigMap is a possible refinement. **If signer-SHA matching isn't possible in Kyverno at all, stop and consult the owner** (fallback: tag-ref policy plus a scheduled `gh attestation verify --signer-digest` audit).
-3. JMESPath / wildcard support for the `workflow.ref` condition.
-4. `ImageValidatingPolicy` vs `ClusterPolicy` in Kyverno 1.19.x.
+1. Kyverno `SigstoreBundle` finds GHCR-stored bundles (OCI referrers or tag-schema fallback) for `attest-build-provenance` / `attest-sbom` with `push-to-registry`. **Resolved (task 11):** yes; GHCR has no referrers API, and Kyverno reads the `sha256-<digest>` fallback tag.
+2. Kyverno keyless attestor subject matching works against the exact SAN with `@<sha>`. Using **multiple attestor entries** as the allowlist is the default design. If Kyverno supports variables there, an allowlist ConfigMap is a possible refinement. **If signer-SHA matching isn't possible in Kyverno at all, stop and consult the owner** (fallback: tag-ref policy plus a scheduled `gh attestation verify --signer-digest` audit). **Resolved (task 11):** exact SAN match works; one attestor per approved SHA.
+3. JMESPath / wildcard support for the `workflow.ref` condition. **Resolved (task 11):** CEL `startsWith('refs/tags/apps/orders-api/v')`.
+4. `ImageValidatingPolicy` vs `ClusterPolicy` in Kyverno 1.19.x. **Resolved (task 11):** `ImageValidatingPolicy`.
 5. GitHub Packages NuGet feed restore with the read-only `NUGET_READ_TOKEN` (classic PAT, `read:packages`) passed via `build-secrets` (§4.1); the feed is not contacted while it hosts no packages.
 6. Availability of "require SHA-pinned actions" and immutable releases on a personal public repo.

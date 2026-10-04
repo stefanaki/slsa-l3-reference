@@ -1,0 +1,37 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: verify-orders-api
+policies:
+  - ../../verify-orders-api.yaml
+resources:
+  - resources.yaml
+results:
+  - policy: verify-orders-api
+    isImageValidatingPolicy: true
+    kind: Pod
+    resources: [slsa-sandbox/release-digest, slsa-sandbox/release-init]
+    result: pass
+  # Tag-only: kyverno 1.19 test runs only the validating half of an ImageValidatingPolicy, never the
+  # mutateDigest rewrite to tag@digest. The validating half alone rejects a bare tag (verifyDigest),
+  # so admission never trusts a tag. In the cluster the rewrite runs first; SPEC §9.4 checks it there.
+  - policy: verify-orders-api
+    isImageValidatingPolicy: true
+    kind: Pod
+    resources: [slsa-sandbox/release-tag]
+    result: fail
+  - policy: verify-orders-api
+    isImageValidatingPolicy: true
+    kind: Pod
+    resources: [slsa-sandbox/unsigned, slsa-sandbox/self-attested, slsa-sandbox/main-build, slsa-sandbox/unsigned-init]
+    result: fail
+  - policy: verify-orders-api
+    isImageValidatingPolicy: true
+    kind: Deployment
+    resources: [slsa-sandbox/deploy-release]
+    result: pass
+  - policy: verify-orders-api
+    isImageValidatingPolicy: true
+    kind: Deployment
+    resources: [slsa-sandbox/deploy-unsigned]
+    result: fail
