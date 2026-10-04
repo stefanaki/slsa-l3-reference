@@ -311,12 +311,14 @@ Follow `.claude/skills/kabu-dev` conventions in that repo:
 
 Cluster facts: single Talos node, **amd64**, Kubernetes v1.36, Flux v2.9, Cilium Gateway API.
 
+Kyverno 1.19.x is tested upstream on Kubernetes v1.33–v1.35 only. Running it on kabu (v1.36) is an accepted deviation, to revisit when Kyverno 1.20 ships.
+
 ### 9.1 Layout
 ```
 infrastructure/kabu/kyverno/
   namespace.yaml
   helm-repository.yaml        # flux-system, https://kyverno.github.io/kyverno/
-  kyverno.yaml                # HelmRelease, pinned version, CRDs CreateReplace, single-node sized
+  kyverno.yaml                # HelmRelease, pinned version, single-node sized (CRDs are chart templates, removed with the release)
   kustomization.yaml
 apps/kabu/slsa-l3-reference/
   kustomization.yaml          # lists children
@@ -336,6 +338,12 @@ apps/kabu/slsa-l3-reference/
 Ordering: `apps` already has `dependsOn: infrastructure` with `wait: true`, so Kyverno and its CRDs are ready before the policies are applied. No extra Flux Kustomization and no Helm chart for the policies.
 
 **Known first-install race:** within `apps`, the policy and the Deployment are applied in the same pass. On the very first bootstrap, run `kubectl -n slsa-l3-reference rollout restart deploy/orders-api` once. Documented.
+
+**Kyverno rollback:** Kyverno's CRDs are chart templates, so uninstalling the release deletes every policy and report. Roll back in separate commits, so Helm's uninstall hooks run while the `kyverno` namespace still exists:
+1. Remove the policies.
+2. Drop `kyverno.yaml` from `infrastructure/kabu/kyverno/kustomization.yaml` and wait for the uninstall.
+3. Remove the directory.
+4. Confirm `kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations | grep kyverno` is empty.
 
 ### 9.2 Workload
 - Image: `ghcr.io/stefanaki/slsa-l3-reference/orders-api:X.Y.Z@sha256:…`.
@@ -359,7 +367,7 @@ Ordering: `apps` already has `dependsOn: infrastructure` with `wait: true`, so K
   3. SBOM (`https://cyclonedx.org/bom`) signed by an approved attestor → else `signer: …`;
   4. `buildDefinition.externalParameters.workflow.repository` == `https://github.com/stefanaki/slsa-l3-reference` → else `source: …`;
   5. `buildDefinition.externalParameters.workflow.ref` starts with `refs/tags/apps/orders-api/v` → else `source: …`.
-- **Cluster egress:** Kyverno fetches images and bundles from `ghcr.io` and the Sigstore trust root from `tuf-repo-cdn.sigstore.dev`. Task 12 confirms whether it also contacts Rekor.
+- **Cluster egress:** Kyverno fetches images and bundles from `ghcr.io` and the Sigstore trust root from `tuf-repo-cdn.sigstore.dev`. Task 13 confirms whether it also contacts Rekor (task 12 only confirmed Rekor is reachable from the cluster).
 
 ### 9.4 Acceptance in cluster
 - The `orders-api` release image is admitted and served at `orders-slsa.gstefan.net/healthz`.
