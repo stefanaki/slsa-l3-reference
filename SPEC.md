@@ -49,7 +49,8 @@ Key rules:
 3. **Admission accepts only signer SHAs on an explicit allowlist** (the "signer digest allowlist"). A random branch commit, a moved tag or an unreleased platform version is rejected.
 4. **Admission accepts only images built from release tags** `refs/tags/apps/<app>/v*` of this repo.
 5. **Admitted pods always run by digest** (`tag@sha256:…` in manifests, plus Kyverno `mutateDigest` and `verifyDigest`).
-6. Untrusted, repo-defined build commands (Dockerfile `RUN`, `go test`, `dotnet test`) **never run in a job that has `id-token: write`.** Signing happens only in a separate `attest` job with fixed steps.
+6. Untrusted, repo-defined build commands (Dockerfile `RUN`, `go build` of repo code) **never run in a job that has `id-token: write`.** Signing happens only in a separate `attest` job with fixed steps.
+7. **Testing is a CI concern, not a platform step.** Tests run in the project's PR workflow as a required status check (§7, §8.2). `main` accepts **squash merges only**, with branches up to date, so every commit added to `main` after the ruleset exists has the exact tree that passed the checks. The platform refuses a release tag whose commit is not on `refs/heads/main`. Together: every attested release cut from a commit merged under the ruleset was tested before merge. Commits pushed directly to `main` before the ruleset (implementation tasks 01–07) carry no such guarantee and must not be released. Provenance itself makes no claim about tests.
 
 ---
 
@@ -104,10 +105,10 @@ slsa-l3-reference/
 - **Multi-stage Dockerfile:**
   - `build`: `mcr.microsoft.com/dotnet/sdk:10.0@sha256:…`; restore, then build.
     - Restore uses `RUN --mount=type=secret,id=nuget_token`. The token never lands in a layer, the cache or the provenance.
-  - `test`: `dotnet test`. The platform builds this target first.
+  - `test`: `dotnet test`. Built by the project's CI test job (`--target test`), not by the platform.
   - `publish`: `dotnet publish -c Release`.
   - `runtime`: `mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled@sha256:…`.
-- **Simulated private feed:** `nuget.config` adds the owner's GitHub Packages NuGet feed (`https://nuget.pkg.github.com/stefanaki/index.json`) next to nuget.org. It's authenticated by the `nuget-token` secret, so the secret-mount path is exercised for real. The feed hosts no packages.
+- **Simulated private feed:** `nuget.config` adds the owner's GitHub Packages NuGet feed (`https://nuget.pkg.github.com/stefanaki/index.json`) next to nuget.org. It's authenticated by a dedicated **read-only** credential (repo secret `NUGET_READ_TOKEN`: classic PAT with only `read:packages`), passed to the platform in `build-secrets` as `nuget_token`. Not the caller's `GITHUB_TOKEN`: the Dockerfile's `RUN` steps are untrusted (§2 rule 6) and must not see a token with `packages: write` or `attestations: write`. The feed hosts no packages.
   - Local restores need `NUGET_TOKEN=$(gh auth token)`. Documented in `apps/orders-api/README.md`.
 - All base images are pinned by digest (Renovate keeps them current).
 
@@ -129,13 +130,12 @@ slsa-l3-reference/
 | `app` | string | required | `^[a-z0-9-]+$` |
 | `context` | string | `apps/<app>` | must be under `apps/` |
 | `dockerfile` | string | `<context>/Dockerfile` | must be under `context` |
-| `test-target` | string | `test` | Dockerfile stage name |
 | `build-args` | string | `""` | newline-separated `KEY=VALUE`, **non-secret only** |
-| `platforms` | string | `linux/amd64,linux/arm64` | |
+| `platforms` | string | `linux/amd64,linux/arm64` | `os/arch` list; must include `linux/amd64` (the attested SBOM is generated from it, §5.2) |
 
 | Secret | Use |
 |---|---|
-| `nuget-token` | passed only as a BuildKit secret mount (`id=nuget_token`) |
+| `build-secrets` | optional; one `id=value` per line (non-empty value, no `"`), validated by the platform without printing values, then passed as BuildKit secret mounts. The project picks the ids its Dockerfile uses; the platform knows no ecosystem. Use least-privilege, read-only credentials: `RUN` steps can read them. |
 
 | Output | |
 |---|---|
@@ -145,21 +145,24 @@ slsa-l3-reference/
 - The registry and owner are **fixed by the platform**. Callers can't choose where images go.
 - Push and attest behaviour is **derived from `github.event_name` and `github.ref`, not from inputs.** A caller can't turn on attestation for a PR.
 
-| Trigger (in caller) | Test | Push | Image tag | Attest |
+| Trigger (in caller) | Build | Push | Image tag | Attest |
 |---|---|---|---|---|
 | `pull_request` | ✅ | ❌ | – | ❌ |
 | push to `main` | ✅ | ✅ | `main-<shortsha>` | ✅ |
-| push tag `apps/<app>/vX.Y.Z` | ✅ | ✅ | `X.Y.Z` | ✅ |
+| push tag `apps/<app>/vX.Y.Z` (commit on `main`) | ✅ | ✅ | `X.Y.Z` | ✅ |
+
+Any other trigger, or a release tag whose commit isn't on `main`, fails the run (§2 rule 7).
 
 ### 5.2 Jobs
 
-1. **`build`**: `contents: read`, `packages: write` (`packages: read` for the NuGet feed). **No `id-token`.**
+1. **`build`**: `contents: read`, `packages: write` (push to GHCR). **No `id-token`.** The job's `GITHUB_TOKEN` never reaches BuildKit; feed credentials come only from `build-secrets`.
+   - Release tags only: check that the tagged commit is on `refs/heads/main` (GitHub compare API: `behind` or `identical`), else fail.
    - Set up buildx (BuildKit, `docker-container` driver).
-   - Build `--target <test-target>`; it fails the job on test failure.
-   - Build and push the final stage:
+   - Pull requests: build the final stage for all platforms without pushing (catches Dockerfile breakage).
+   - `main` and release tags: build and push the final stage:
      - `provenance: mode=max`, `sbom: true`. These are BuildKit's own unsigned records; the index digest covers them.
      - `SOURCE_DATE_EPOCH` = commit timestamp, and output `rewrite-timestamp=true`.
-     - **Cache:** `type=gha`, scoped per app, for `main` and PRs. **No cache on release tags.**
+     - **Cache:** `type=gha`, scoped per app. **Attested builds never read the cache:** `main` only writes it (any workflow on `main` can write default-branch caches, so reading it would let a project workflow plant layers into an attested build); PRs read and write it; release tags use no cache at all.
    - Output: index digest.
 2. **`scan`**: `contents: read`, `packages: read`. No `id-token`.
    - Trivy (pinned version) against `ghcr.io/…/<app>@<digest>`, reusing the registry login.
@@ -186,12 +189,12 @@ slsa-l3-reference/
 | `path` | string | `apps/<app>` | must be under `apps/` |
 | `targets` | string | `linux/amd64,linux/arm64,darwin/amd64,darwin/arm64` | `os/arch` list |
 
-Same event matrix as §5.1: PRs only test, `main` attests and uploads workflow artifacts, `apps/<app>/vX.Y.Z` tags attest and publish a GitHub Release.
+Same event matrix as §5.1: PRs only build, `main` attests and uploads workflow artifacts, `apps/<app>/vX.Y.Z` tags attest and publish a GitHub Release.
 
 ### 6.2 Jobs
 
 1. **`build`**: `contents: read`.
-   - `go test ./...`.
+   - Release tags only: the tagged commit must be on `main`.
    - Build each target with:
      - `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid= -X main.version=<version>"`
      - `SOURCE_DATE_EPOCH` = commit timestamp.
@@ -218,6 +221,14 @@ on:
     paths: ["apps/orders-api/**"]
     tags: ["apps/orders-api/v*"]
 jobs:
+  test:                       # required status check (§8.2); no id-token
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@<sha> # vX
+      - run: docker buildx build --secret id=nuget_token,env=NUGET_TOKEN --target test apps/orders-api
+        env: { NUGET_TOKEN: "${{ secrets.NUGET_READ_TOKEN }}" }
   release:
     permissions: { contents: read, packages: write, id-token: write, attestations: write }
     uses: stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<sha> # platform/vX.Y.Z
@@ -226,9 +237,12 @@ jobs:
       build-args: |
         DOTNET_CONFIGURATION=Release
     secrets:
-      nuget-token: ${{ secrets.GITHUB_TOKEN }}
+      build-secrets: |
+        nuget_token=${{ secrets.NUGET_READ_TOKEN }}
 ```
-`release-inventory.yml` follows the same shape against `platform-go.yml` (adds `contents: write` for the release job).
+`release-inventory.yml` follows the same shape against `platform-go.yml` (its `test` job runs `go test ./...`; adds `contents: write` for the release job).
+
+The `test` job is project-owned: the project decides *what* is tested; the ruleset (§8.2) decides that it must pass before merge.
 
 The caller grants the *maximum* permissions. The platform narrows them per job (§5.2, §6.2).
 
@@ -259,7 +273,8 @@ Renovate GitHub App on this public repo.
 - Group the platform bump separately so it's reviewed on its own.
 
 ### 8.2 Rulesets and settings (documented in `docs/rulesets.md`; configured by hand)
-1. **`main`:** require a PR with **0 required approvals**, require status checks (platform PR-mode runs), block force pushes and deletion.
+1. **`main`:** require a PR with **0 required approvals** and **squash merge as the only allowed merge method** (also disable merge commits and rebase merging in the repo settings), require status checks (the projects' `test` jobs and the platform PR-mode builds) with **branches up to date before merging**, block force pushes and deletion. With squash-only and up-to-date branches, the commit that lands on `main` has the same tree the checks ran on; merge commits or rebases would add untested intermediate commits to `main` (§2 rule 7).
+   - Required checks and `paths` filters interact: a PR that doesn't trigger a workflow never reports its check. Task 06/08 must handle this (e.g. no `paths` filter on `pull_request`, or an always-reporting aggregate job).
    - CODEOWNERS documents platform ownership but isn't enforced: a solo maintainer can't approve their own PR.
    - `rulesets.md` explains that a real org requires CODEOWNERS review by a second person.
 2. **`apps/*/v*` tags:** restrict creation, update and deletion to the owner. This controls who can cut a release that admission will accept.
@@ -451,5 +466,5 @@ Not used: `cosign` (`gh attestation verify` covers it), `act` (it can't get GitH
 2. Kyverno keyless attestor subject matching works against the exact SAN with `@<sha>`. Using **multiple attestor entries** as the allowlist is the default design. If Kyverno supports variables there, an allowlist ConfigMap is a possible refinement. **If signer-SHA matching isn't possible in Kyverno at all, stop and consult the owner** (fallback: tag-ref policy plus a scheduled `gh attestation verify --signer-digest` audit).
 3. JMESPath / wildcard support for the `workflow.ref` condition.
 4. `ImageValidatingPolicy` vs `ClusterPolicy` in Kyverno 1.19.x.
-5. GitHub Packages NuGet feed restore with `GITHUB_TOKEN` from a reusable workflow (`packages: read`).
+5. GitHub Packages NuGet feed restore with the read-only `NUGET_READ_TOKEN` (classic PAT, `read:packages`) passed via `build-secrets` (§4.1); the feed is not contacted while it hosts no packages.
 6. Availability of "require SHA-pinned actions" and immutable releases on a personal public repo.
