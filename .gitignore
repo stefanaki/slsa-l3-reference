@@ -5,3 +5,6 @@ tasks/
 bin/
 obj/
 TestResults/
+
+# Build output
+dist/
