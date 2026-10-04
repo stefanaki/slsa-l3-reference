@@ -349,7 +349,7 @@ Ordering: `apps` already has `dependsOn: infrastructure` with `wait: true`, so K
 - Image: `ghcr.io/stefanaki/slsa-l3-reference/orders-api:X.Y.Z@sha256:…`.
 - Restricted securityContext: `runAsNonRoot`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`, read-only root filesystem.
 - Liveness and readiness probes on `/healthz`; small resource requests and limits.
-- **Digest updates:** Renovate in `stefanaki/lab` with the `kubernetes` manager enabled for `apps/kabu/slsa-l3-reference/**`. It opens PRs bumping `tag@digest` when new `X.Y.Z` tags appear in GHCR.
+- **Digest updates:** manual. Bump `tag@digest` in `apps/kabu/slsa-l3-reference/orders-api/deployment.yaml` when a new `X.Y.Z` release is published. Renovate automation is out of scope for this reference project.
 
 ### 9.3 Kyverno policy (`ImageValidatingPolicy`, `Deny`)
 - **API:** `policies.kyverno.io/v1` `ImageValidatingPolicy`. `ClusterPolicy` `verifyImages` also works in 1.19.x, but it is deprecated there and gives every rejection the same generic message.
@@ -360,14 +360,14 @@ Ordering: `apps` already has `dependsOn: infrastructure` with `wait: true`, so K
   ```
   https://github.com/stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<approved-sha>
   ```
-  Each attestor carries a comment naming the `platform/vX.Y.Z` it corresponds to. Removing it revokes that platform version.
+  Each attestor is named after the `platform/vX.Y.Z` it corresponds to (e.g. `platformV1_0_0`); the homelab copy carries no comments. Removing it revokes that platform version.
 - **Validations, in order; the first failure is the rejection message.** The order is load-bearing: Kyverno stores verified payloads per predicate type for the whole request, so checks 4–5 read provenance only because check 2 has just replaced it with what an approved commit signed.
   1. provenance signed by *any* workflow of this repo (a `subjectRegExp` attestor that never admits on its own) → else `no attestation: …`;
   2. provenance (`https://slsa.dev/provenance/v1`) signed by an approved attestor → else `signer: …`;
   3. SBOM (`https://cyclonedx.org/bom`) signed by an approved attestor → else `signer: …`;
   4. `buildDefinition.externalParameters.workflow.repository` == `https://github.com/stefanaki/slsa-l3-reference` → else `source: …`;
   5. `buildDefinition.externalParameters.workflow.ref` starts with `refs/tags/apps/orders-api/v` → else `source: …`.
-- **Cluster egress:** Kyverno fetches images and bundles from `ghcr.io` and the Sigstore trust root from `tuf-repo-cdn.sigstore.dev`. Task 13 confirms whether it also contacts Rekor (task 12 only confirmed Rekor is reachable from the cluster).
+- **Cluster egress:** Kyverno fetches images and bundles from `ghcr.io` (blobs redirect to `pkg-containers.githubusercontent.com`) and the Sigstore trust root from `tuf-repo-cdn.sigstore.dev`. It does not contact Rekor: the transparency-log entry inside each Sigstore bundle is verified offline against the trust root (confirmed in task 13 through a logging proxy).
 
 ### 9.4 Acceptance in cluster
 - The `orders-api` release image is admitted and served at `orders-slsa.gstefan.net/healthz`.
@@ -410,7 +410,7 @@ Inspect BuildKit's unsigned records: `docker buildx imagetools inspect <image> -
 
 ## 11. Docs content
 
-- **`architecture.md`:** roles, trust boundaries, and a diagram of caller → platform (build / scan / attest jobs) → GHCR → Renovate → Flux → Kyverno.
+- **`architecture.md`:** roles, trust boundaries, and a diagram of caller → platform (build / scan / attest jobs) → GHCR → Flux → Kyverno.
 - **`slsa-l3-mapping.md`:** SLSA Build L3 requirements mapped to where they're met:
   - provenance exists, is authentic and unforgeable;
   - the build is isolated (hosted runners, reusable workflow, signing job separated from user-defined steps);
@@ -438,7 +438,7 @@ Inspect BuildKit's unsigned records: `docker buildx imagetools inspect <image> -
 | 2 | Platform and callers | `platform-docker.yml`, `platform-go.yml`, `platform-release.yml`, callers, CODEOWNERS, Renovate | **confirm before creating the public GitHub repo and pushing** |
 | 3 | First releases | rulesets configured (manual), `platform/v1.0.0`, `apps/orders-api/v1.0.0`, `apps/inventory/v1.0.0` | `scripts/verify.sh` passes |
 | 4 | Negative tests | `negative-test.yml`, negative cases in `verify.sh` | all negatives fail verification |
-| 5 | Homelab | Kyverno, policy, orders-api manifests, lab Renovate change on branch `kabu` | **explicit approval before touching `~/homelab/lab`**; §9.4 passes |
+| 5 | Homelab | Kyverno, policy, orders-api manifests on branch `kabu` | **explicit approval before touching `~/homelab/lab`**; §9.4 passes |
 | 6 | Docs | `docs/*`, README | review |
 
 ---

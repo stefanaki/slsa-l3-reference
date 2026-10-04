@@ -49,14 +49,17 @@ jobs:
             echo "| Commit | \`$SHA\` |"
             echo
             # Only platform-docker.yml signs images, so only it goes into the Kyverno allowlist (SPEC §9.3).
-            echo "Add this attestor entry to the signer allowlist in \`stefanaki/lab\` (SPEC §2 rule 3, §8.3, §9.3):"
+            name="platformV$(tr . _ <<<"${TAG#platform/v}")"
+            echo "Add this attestor to \`spec.attestors\` and \`attestors.$name\` to the \`approved\` variable in \`policy/verify-orders-api.yaml\`, run \`kyverno test policy/tests\`, then copy the policy without comments to \`stefanaki/lab\` (SPEC §2 rule 3, §8.3, §9.3):"
             echo
             echo '```yaml'
-            echo "# $TAG"
-            echo "- keyless:"
-            echo "    issuer: https://token.actions.githubusercontent.com"
-            echo "    subject: https://github.com/$REPO/.github/workflows/platform-docker.yml@$SHA"
-            echo "    rekor:"
+            echo "- name: $name"
+            echo "  cosign:"
+            echo "    keyless:"
+            echo "      identities:"
+            echo "        - issuer: https://token.actions.githubusercontent.com"
+            echo "          subject: https://github.com/$REPO/.github/workflows/platform-docker.yml@$SHA"
+            echo "    ctlog:"
             echo "      url: https://rekor.sigstore.dev"
             echo '```'
             echo
