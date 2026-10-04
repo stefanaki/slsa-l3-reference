@@ -39,7 +39,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    uses: stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@f15d9bcb086403847304ae2c441218ccbc4fe198 # platform/v1.0.0
+    uses: stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@78c2b4251876144f5fc346f843c313efbaac745b # platform/v1.0.0
     with:
       app: orders-api
     secrets:

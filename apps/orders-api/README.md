@@ -30,3 +30,7 @@ docker run --rm --read-only -p 8080:8080 orders-api:dev
 Notes:
 - A build without `--secret` fails with `secret nuget_token: not found`, but only when the restore layer is not cached. BuildKit does not include secrets in the cache key.
 - `packageSourceMapping` sends every package to nuget.org and only `Stefanaki.*` to the GitHub feed. The feed hosts no packages, so restore never contacts it: the build proves the secret is passed through without leaking, not that the token is valid.
+
+## Release
+
+Push a tag `apps/orders-api/vX.Y.Z` on a PR merge commit on `main`. The pinned platform (`platform-docker.yml`) builds, scans, pushes `ghcr.io/stefanaki/slsa-l3-reference/orders-api:X.Y.Z` and attests its SLSA provenance and SBOM. Verify with `scripts/verify.sh orders-api X.Y.Z`.
