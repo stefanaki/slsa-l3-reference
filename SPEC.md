@@ -369,22 +369,28 @@ Ordering: `apps` already has `dependsOn: infrastructure` with `wait: true`, so K
 ## 10. Verification outside the cluster (`scripts/verify.sh`, `docs/verification.md`)
 
 ```bash
-# image
-gh attestation verify oci://ghcr.io/stefanaki/slsa-l3-reference/orders-api:X.Y.Z \
+# image, by digest (resolve the tag first; a tag can be repointed)
+gh attestation verify oci://ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:<digest> \
   --repo stefanaki/slsa-l3-reference \
-  --signer-workflow stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml \
+  --cert-identity https://github.com/stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<approved-sha> \
   --signer-digest <approved-sha> \
   --source-ref refs/tags/apps/orders-api/vX.Y.Z \
+  --deny-self-hosted-runners \
   --predicate-type https://slsa.dev/provenance/v1
-# same with --predicate-type https://cyclonedx.org/bom for the SBOM
+# same with --predicate-type https://cyclonedx.org/bom for the SBOM,
+# and both again with --bundle-from-oci (the registry-stored bundles Kyverno reads)
 
-# Go binary
+# Go binary (each of the 4 from the GitHub Release), both predicate types
 gh attestation verify ./inventory_linux_amd64 \
   --repo stefanaki/slsa-l3-reference \
-  --signer-workflow stefanaki/slsa-l3-reference/.github/workflows/platform-go.yml \
+  --cert-identity https://github.com/stefanaki/slsa-l3-reference/.github/workflows/platform-go.yml@<approved-sha> \
   --signer-digest <approved-sha> \
-  --source-ref refs/tags/apps/inventory/vX.Y.Z
+  --source-ref refs/tags/apps/inventory/vX.Y.Z \
+  --deny-self-hosted-runners \
+  --predicate-type https://slsa.dev/provenance/v1
 ```
+`--cert-identity` matches the full certificate SAN exactly. `--signer-workflow` is not used: before gh 2.102.0 it is an unanchored prefix regex. `<approved-sha>` comes from the allowlist hardcoded in `verify.sh`, never from a tag.
+
 The script also runs the negative cases and expects them to fail.
 
 Inspect BuildKit's unsigned records: `docker buildx imagetools inspect <image> --format '{{json .Provenance}}'` and `'{{json .SBOM}}'`.
@@ -441,7 +447,7 @@ Workstation: Fedora 43, x86_64, zsh. Snapshot from 2026-10-04.
 | Docker | 29.8.2, containerd image store | system | local image builds; multi-platform images loadable |
 | buildx (BuildKit) | 0.37.1 | system | same builder as CI |
 | Trivy | 0.74.0 | system | SBOM and CVE scans, same as CI |
-| gh | 2.87.3 | system, logged in as `stefanaki` | repo ops, `gh attestation verify` |
+| gh | 2.102.0 | system (`gh-cli` repo from cli.github.com), logged in as `stefanaki` | repo ops, `gh attestation verify` |
 | kubectl / helm / flux | present | system | homelab phase (`kubectl kustomize` instead of standalone kustomize) |
 | git, jq, yq | present | system | |
 
