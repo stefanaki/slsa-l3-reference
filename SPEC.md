@@ -197,15 +197,14 @@ Same event matrix as §5.1: PRs only build, `main` attests and uploads workflow 
    - Release tags only: the tagged commit must be on `main`.
    - Build each target with:
      - `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid= -X main.version=<version>"`
-     - `SOURCE_DATE_EPOCH` = commit timestamp.
+     - No `SOURCE_DATE_EPOCH`: `go build` ignores it. Reproducibility comes from `-trimpath`, `-buildid=` and the git-derived `vcs.*` stamps (commit time, revision, `vcs.modified=false`).
    - Output `<app>_<os>_<arch>` binaries plus `checksums.txt` (artifact upload).
 2. **`scan`**: `trivy rootfs` over the binaries → CycloneDX `sbom.cdx.json`, plus the same CRITICAL CVE gate.
 3. **`attest`**: `id-token: write`, `attestations: write`, `contents: read`. Fixed steps only.
    - `attest-build-provenance` with `subject-path` over all binaries: one attestation, many subjects.
    - `attest-sbom` over the same subjects.
 4. **`release`** (tags only): `contents: write`. **No `id-token`.**
-   - Create or update the GitHub Release for `apps/<app>/vX.Y.Z`.
-   - Upload the binaries, `checksums.txt` and `sbom.cdx.json`.
+   - Create the GitHub Release for `apps/<app>/vX.Y.Z` once: as a draft, upload the binaries, `checksums.txt` and `sbom.cdx.json`, then publish. A tag that already has a published release fails the job, and the job checks the release's asset names and sha256 digests against the attested files before and after publishing. The platform never changes published assets; only immutable releases (§8.2, optional) also stop others from changing them.
 
 ---
 
@@ -279,7 +278,7 @@ Renovate GitHub App on this public repo.
    - `rulesets.md` explains that a real org requires CODEOWNERS review by a second person.
 2. **`apps/*/v*` tags:** restrict creation, update and deletion to the owner. This controls who can cut a release that admission will accept.
 3. **`platform/v*` tags:** restrict creation, update and deletion. Good practice; security doesn't depend on it, because admission checks the SHA.
-4. Optional, if available: require actions to be pinned to a full SHA (repo Actions setting), and immutable releases for `platform/v*`.
+4. Optional, if available: require actions to be pinned to a full SHA (repo Actions setting), and immutable releases (a repository-wide setting, so it covers `platform/v*` and `apps/*/v*` releases alike).
 
 ### 8.3 Platform release → allowlist flow
 1. Platform change merged to `main` via a reviewed PR.
