@@ -1,0 +1,10 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: release-digest
+  namespace: slsa-sandbox
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanaki/slsa-l3-reference/orders-api@sha256:71a23e7ccda289f58b2835d0ed9ec898b7a5a56f4f7f5929d2eafee145c3432c
