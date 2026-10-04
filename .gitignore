@@ -1,2 +1,7 @@
 # Agentic harness tasks
 tasks/
+
+# .NET
+bin/
+obj/
+TestResults/
