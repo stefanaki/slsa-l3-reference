@@ -162,7 +162,7 @@ Any other trigger, or a release tag whose commit isn't on `main`, fails the run 
    - `main` and release tags: build and push the final stage:
      - `provenance: mode=max`, `sbom: true`. These are BuildKit's own unsigned records; the index digest covers them.
      - `SOURCE_DATE_EPOCH` = commit timestamp, and output `rewrite-timestamp=true`.
-     - **Cache:** `type=gha`, scoped per app. **Attested builds never read the cache:** `main` only writes it (any workflow on `main` can write default-branch caches, so reading it would let a project workflow plant layers into an attested build); PRs read and write it; release tags use no cache at all.
+     - **No build cache**, in any mode (`no-cache: true`, no `cache-from`/`cache-to`). Every build starts cold: no layer that another workflow could have written reaches an image, and every PR build actually uses the build secrets (BuildKit leaves secrets out of the cache key, so a cached restore layer would skip them).
    - Output: index digest.
 2. **`scan`**: `contents: read`, `packages: read`. No `id-token`.
    - Trivy (pinned version) against `ghcr.io/…/<app>@<digest>`, reusing the registry login.

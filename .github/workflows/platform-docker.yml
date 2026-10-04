@@ -120,14 +120,6 @@ jobs:
             fail "unsupported trigger: event=$EVENT_NAME ref=$REF"
           fi
 
-          # Attested builds never read the gha cache: any workflow on main can write it.
-          # main only writes it (for PRs); PRs read and write; release tags use no cache.
-          cache_from=""; cache_to=""
-          case "$mode" in
-            pr)   cache_from="type=gha,scope=docker-$APP"; cache_to="type=gha,scope=docker-$APP,mode=max" ;;
-            main) cache_to="type=gha,scope=docker-$APP,mode=max" ;;
-          esac
-
           # Values derived from the trigger go last, so nothing written before them can override them.
           delimiter="EOF_$(openssl rand -hex 16)"
           {
@@ -138,8 +130,6 @@ jobs:
             echo "VERSION=$version"
             echo "$delimiter"
             echo "epoch=$(git log -1 --format=%ct)"
-            echo "cache-from=$cache_from"
-            echo "cache-to=$cache_to"
             echo "image=$IMAGE_PREFIX/$APP"
             echo "tag=$tag"
             echo "mode=$mode"
@@ -190,6 +180,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Repo-defined commands (Dockerfile RUN) only ever run in this job, which has no id-token.
+      # No build cache in any mode: every build starts cold, so nothing a workflow on main can write ends up in an image.
       - name: Build (pull request, no push)
         if: steps.plan.outputs.mode == 'pr'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -201,9 +192,9 @@ jobs:
           secrets: ${{ secrets.build-secrets }}
           provenance: false
           sbom: false
+          # Build only, discard the result.
           outputs: type=cacheonly
-          cache-from: ${{ steps.plan.outputs.cache-from }}
-          cache-to: ${{ steps.plan.outputs.cache-to }}
+          no-cache: true
 
       - name: Build and push
         id: push
@@ -220,9 +211,7 @@ jobs:
           provenance: mode=max
           sbom: true
           outputs: type=image,name=${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.tag }},push=true,rewrite-timestamp=true,oci-mediatypes=true
-          no-cache: ${{ steps.plan.outputs.mode == 'release' }}
-          cache-from: ${{ steps.plan.outputs.cache-from }}
-          cache-to: ${{ steps.plan.outputs.cache-to }}
+          no-cache: true
 
   scan:
     needs: build
