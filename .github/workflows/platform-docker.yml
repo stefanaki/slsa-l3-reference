@@ -51,6 +51,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      pull-requests: read # release check: GET commits/{sha}/pulls (needed on private repos)
       packages: write
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
@@ -136,8 +137,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "mode=$mode tag=${tag:-none} version=$version"
 
-      # Tests are a required PR check (SPEC §2 rule 7), so only commits on main may be released.
-      - name: Check release commit is on main
+      # Tests are a required PR check (SPEC §2 rule 7), so only commits that a merged PR created on main
+      # (its squash or merge commit, main's first-parent line) may be released. A PR's own intermediate
+      # commits also end up in main's history when merge commits are allowed; they were never tested.
+      - name: Check release commit is a PR merge on main
         if: steps.plan.outputs.mode == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -148,9 +151,13 @@ jobs:
           # refs/heads/main, so a tag named "main" cannot shadow the branch.
           status="$(gh api "repos/$REPO/compare/refs/heads/main...$SHA" --jq .status)"
           case "$status" in
-            behind|identical) echo "$SHA is on main" ;;
+            behind|identical) ;;
             *) echo "::error::release tag commit $SHA is not on main (compare status: $status)"; exit 1 ;;
           esac
+          pr="$(gh api "repos/$REPO/commits/$SHA/pulls" \
+            --jq "[.[] | select(.merged_at != null and .base.ref == \"main\" and .merge_commit_sha == \"$SHA\") | .number] | first // empty")"
+          [[ -n "$pr" ]] || { echo "::error::release tag commit $SHA is not the merge commit of a PR merged into main"; exit 1; }
+          echo "$SHA is on main, merged by PR #$pr"
 
       # build-push-action silently drops lines without a value and CSV-parses quotes; fail early instead.
       - name: Validate build secrets

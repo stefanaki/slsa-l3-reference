@@ -39,6 +39,7 @@ jobs:
     name: release (inventory)  # platform checks report as "release (inventory) / build" etc.
     permissions:
       contents: write
+      pull-requests: read
       id-token: write
       attestations: write
     uses: stefanaki/slsa-l3-reference/.github/workflows/platform-go.yml@f15d9bcb086403847304ae2c441218ccbc4fe198 # platform/v1.0.0

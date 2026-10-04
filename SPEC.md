@@ -50,7 +50,7 @@ Key rules:
 4. **Admission accepts only images built from release tags** `refs/tags/apps/<app>/v*` of this repo.
 5. **Admitted pods always run by digest** (`tag@sha256:…` in manifests, plus Kyverno `mutateDigest` and `verifyDigest`).
 6. Untrusted, repo-defined build commands (Dockerfile `RUN`, `go build` of repo code) **never run in a job that has `id-token: write`.** Signing happens only in a separate `attest` job with fixed steps.
-7. **Testing is a CI concern, not a platform step.** Tests run in the project's PR workflow as a required status check (§7, §8.2). `main` accepts **squash merges only**, with branches up to date, so every commit added to `main` after the ruleset exists has the exact tree that passed the checks. The platform refuses a release tag whose commit is not on `refs/heads/main`. Together: every attested release cut from a commit merged under the ruleset was tested before merge. Commits pushed directly to `main` before the ruleset (implementation tasks 01–07) carry no such guarantee and must not be released. Provenance itself makes no claim about tests.
+7. **Testing is a CI concern, not a platform step.** Tests run in the project's PR workflow as a required status check (§7, §8.2). `main` accepts **merge commits and squash merges** (no rebase merging), with branches up to date, so the commit each PR merge creates on `main` has the exact tree that passed the checks. With merge commits, the PR's own intermediate commits also end up in `main`'s history, untested. So the platform accepts a release tag only if its commit is on `refs/heads/main` **and** is the merge commit (`merge_commit_sha`) of a PR merged into `main`. Together: every attested release was tested before merge. Commits pushed directly to `main` before the ruleset (implementation tasks 01–07) aren't PR merges, so the platform refuses to release them. Provenance itself makes no claim about tests.
 
 ---
 
@@ -149,14 +149,14 @@ slsa-l3-reference/
 |---|---|---|---|---|
 | `pull_request` | ✅ | ❌ | – | ❌ |
 | push to `main` | ✅ | ✅ | `main-<shortsha>` | ✅ |
-| push tag `apps/<app>/vX.Y.Z` (commit on `main`) | ✅ | ✅ | `X.Y.Z` | ✅ |
+| push tag `apps/<app>/vX.Y.Z` (PR merge commit on `main`) | ✅ | ✅ | `X.Y.Z` | ✅ |
 
-Any other trigger, or a release tag whose commit isn't on `main`, fails the run (§2 rule 7).
+Any other trigger, or a release tag whose commit isn't a PR merge commit on `main`, fails the run (§2 rule 7).
 
 ### 5.2 Jobs
 
-1. **`build`**: `contents: read`, `packages: write` (push to GHCR). **No `id-token`.** The job's `GITHUB_TOKEN` never reaches BuildKit; feed credentials come only from `build-secrets`.
-   - Release tags only: check that the tagged commit is on `refs/heads/main` (GitHub compare API: `behind` or `identical`), else fail.
+1. **`build`**: `contents: read`, `packages: write` (push to GHCR), `pull-requests: read` (release check; public repos work without it, private repos don't). **No `id-token`.** The job's `GITHUB_TOKEN` never reaches BuildKit; feed credentials come only from `build-secrets`.
+   - Release tags only: check that the tagged commit is on `refs/heads/main` (GitHub compare API: `behind` or `identical`) and is the `merge_commit_sha` of a PR merged into `main` (`GET /commits/{sha}/pulls`), else fail.
    - Set up buildx (BuildKit, `docker-container` driver).
    - Pull requests: build the final stage for all platforms without pushing (catches Dockerfile breakage).
    - `main` and release tags: build and push the final stage:
@@ -193,8 +193,8 @@ Same event matrix as §5.1: PRs only build, `main` attests and uploads workflow 
 
 ### 6.2 Jobs
 
-1. **`build`**: `contents: read`.
-   - Release tags only: the tagged commit must be on `main`.
+1. **`build`**: `contents: read`, `pull-requests: read` (release check, as §5.2).
+   - Release tags only: the tagged commit must be a PR merge commit on `main` (same check as §5.2).
    - Build each target with:
      - `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid= -X main.version=<version>"`
      - No `SOURCE_DATE_EPOCH`: `go build` ignores it. Reproducibility comes from `-trimpath`, `-buildid=` and the git-derived `vcs.*` stamps (commit time, revision, `vcs.modified=false`).
@@ -230,7 +230,7 @@ jobs:
         env: { NUGET_TOKEN: "${{ secrets.NUGET_READ_TOKEN }}" }
   release:
     name: release (orders-api) # checks: release (orders-api) / build, / scan, / attest
-    permissions: { contents: read, packages: write, id-token: write, attestations: write }
+    permissions: { contents: read, pull-requests: read, packages: write, id-token: write, attestations: write }
     uses: stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<sha> # platform/vX.Y.Z
     with:
       app: orders-api
@@ -271,7 +271,7 @@ Renovate GitHub App on this public repo.
 - Group the platform bump separately so it's reviewed on its own.
 
 ### 8.2 Rulesets and settings (documented in `docs/rulesets.md`; configured by hand)
-1. **`main`:** require a PR with **0 required approvals** and **squash merge as the only allowed merge method** (also disable merge commits and rebase merging in the repo settings), require status checks (the projects' `test` jobs and the platform PR-mode builds) with **branches up to date before merging**, block force pushes and deletion. With squash-only and up-to-date branches, the commit that lands on `main` has the same tree the checks ran on; merge commits or rebases would add untested intermediate commits to `main` (§2 rule 7).
+1. **`main`:** require a PR with **0 required approvals**, allowed merge methods **merge commit and squash** (rebase merging disabled, also in the repo settings), require status checks (the projects' `test` jobs and the platform PR-mode builds) with **branches up to date before merging**, block force pushes and deletion. With up-to-date branches, the merge or squash commit has the same tree the checks ran on. Merge commits also bring the PR's untested intermediate commits into `main`'s history, so the platform only releases PR merge commits (§2 rule 7). Rebase merging would put each rebased commit directly on `main`, so it stays off.
    - Rulesets match required checks by name only, so check names are unique per app: `test (<app>)` and `release (<app>) / build` (the platform's PR-mode build).
    - Required checks and `paths` filters interact: a PR that doesn't trigger a workflow never reports its check, and the PR stays blocked. So callers have **no `paths` filter on `pull_request`**: every PR runs every app's `test` job and platform PR build. `push` to `main` keeps its `paths` filter; tag pushes ignore `paths` filters.
    - CODEOWNERS documents platform ownership but isn't enforced: a solo maintainer can't approve their own PR.
