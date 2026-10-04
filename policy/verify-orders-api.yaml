@@ -31,10 +31,7 @@ spec:
   # Evaluated by the API server: the webhook isn't called for Pods without this repo's images.
   matchConditions:
     - name: uses-repo-image
-      expression: >-
-        (object.spec.containers
-          + (has(object.spec.initContainers) ? object.spec.initContainers : []))
-        .exists(c, c.image.startsWith('ghcr.io/stefanaki/slsa-l3-reference/'))
+      expression: "(object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])).exists(c, c.image.startsWith('ghcr.io/stefanaki/slsa-l3-reference/'))"
   matchImageReferences:
     - glob: "ghcr.io/stefanaki/slsa-l3-reference/*"
   validationConfigurations:
