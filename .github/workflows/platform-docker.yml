@@ -1,0 +1,350 @@
+# Build platform for Dockerfile-based apps (SPEC §5).
+# Callers pin this file by commit SHA. Signing happens only in the fixed-step `attest` job.
+name: platform-docker
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: App name; the image is ghcr.io/stefanaki/slsa-l3-reference/<app>.
+        type: string
+        required: true
+      context:
+        description: Build context, under apps/. Defaults to apps/<app>.
+        type: string
+        default: ""
+      dockerfile:
+        description: Dockerfile path, under the context. Defaults to <context>/Dockerfile.
+        type: string
+        default: ""
+      build-args:
+        description: Newline-separated KEY=VALUE build args. Non-secret only; VERSION is set by the platform.
+        type: string
+        default: ""
+      platforms:
+        description: Comma-separated os/arch list.
+        type: string
+        default: linux/amd64,linux/arm64
+    secrets:
+      build-secrets:
+        description: >-
+          One id=value per line (non-empty value, no double quotes), mounted as BuildKit secrets.
+          Dockerfile RUN steps can read them: pass read-only credentials only.
+        required: false
+    outputs:
+      image:
+        description: Image name without tag.
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: Index digest (sha256:...). Empty for pull requests.
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions: {}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/stefanaki/slsa-l3-reference
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      image: ${{ steps.plan.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      # Validates inputs and derives the mode from the caller's event and ref, never from inputs.
+      - id: plan
+        env:
+          APP: ${{ inputs.app }}
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+          PLATFORMS: ${{ inputs.platforms }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [[ "$APP" =~ ^[a-z0-9-]+$ ]] || fail "app must match ^[a-z0-9-]+\$"
+          [[ "$PLATFORMS" =~ ^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?(,[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?)*$ ]] \
+            || fail "platforms must be a comma-separated os/arch list"
+          [[ ",$PLATFORMS," == *,linux/amd64,* ]] || fail "platforms must include linux/amd64 (the SBOM is generated from it)"
+
+          ws="$(realpath "$GITHUB_WORKSPACE")"
+          context="$(realpath -m "$ws/${CONTEXT:-apps/$APP}")"
+          [[ "$context" == "$ws/apps/"* ]] || fail "context must be under apps/"
+          [[ -d "$context" ]] || fail "context ${context#"$ws/"} does not exist"
+          if [[ -n "$DOCKERFILE" ]]; then
+            dockerfile="$(realpath -m "$ws/$DOCKERFILE")"
+          else
+            dockerfile="$context/Dockerfile"
+          fi
+          [[ "$dockerfile" == "$context/"* ]] || fail "dockerfile must be under the context"
+          [[ -f "$dockerfile" ]] || fail "dockerfile ${dockerfile#"$ws/"} does not exist"
+          context="${context#"$ws/"}"
+          dockerfile="${dockerfile#"$ws/"}"
+          # Paths are written to GITHUB_OUTPUT: no newlines or other special characters.
+          for path in "$context" "$dockerfile"; do
+            [[ "$path" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "path contains unsupported characters"
+          done
+
+          while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]] || fail "build-args line is not KEY=VALUE: $line"
+            [[ "$line" == VERSION=* ]] && fail "VERSION is set by the platform"
+          done <<< "$BUILD_ARGS"
+
+          # VERSION must be SemVer: .NET rejects e.g. "main-abc1234" as a Version.
+          short="${SHA:0:7}"
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            mode=pr; tag=""; version="0.0.0-pr-$PR_NUMBER"
+          elif [[ "$EVENT_NAME" == push && "$REF" == refs/heads/main ]]; then
+            mode=main; tag="main-$short"; version="0.0.0-$tag"
+          elif [[ "$EVENT_NAME" == push && "$REF" =~ ^refs/tags/apps/([a-z0-9-]+)/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            [[ "${BASH_REMATCH[1]}" == "$APP" ]] || fail "tag $REF is not for app $APP"
+            mode=release; tag="${REF##*/v}"; version="$tag"
+          else
+            fail "unsupported trigger: event=$EVENT_NAME ref=$REF"
+          fi
+
+          # Attested builds never read the gha cache: any workflow on main can write it.
+          # main only writes it (for PRs); PRs read and write; release tags use no cache.
+          cache_from=""; cache_to=""
+          case "$mode" in
+            pr)   cache_from="type=gha,scope=docker-$APP"; cache_to="type=gha,scope=docker-$APP,mode=max" ;;
+            main) cache_to="type=gha,scope=docker-$APP,mode=max" ;;
+          esac
+
+          # Values derived from the trigger go last, so nothing written before them can override them.
+          delimiter="EOF_$(openssl rand -hex 16)"
+          {
+            echo "context=$context"
+            echo "dockerfile=$dockerfile"
+            echo "build-args<<$delimiter"
+            printf '%s\n' "$BUILD_ARGS" | sed '/^$/d'
+            echo "VERSION=$version"
+            echo "$delimiter"
+            echo "epoch=$(git log -1 --format=%ct)"
+            echo "cache-from=$cache_from"
+            echo "cache-to=$cache_to"
+            echo "image=$IMAGE_PREFIX/$APP"
+            echo "tag=$tag"
+            echo "mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode=$mode tag=${tag:-none} version=$version"
+
+      # Tests are a required PR check (SPEC §2 rule 7), so only commits on main may be released.
+      - name: Check release commit is on main
+        if: steps.plan.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # refs/heads/main, so a tag named "main" cannot shadow the branch.
+          status="$(gh api "repos/$REPO/compare/refs/heads/main...$SHA" --jq .status)"
+          case "$status" in
+            behind|identical) echo "$SHA is on main" ;;
+            *) echo "::error::release tag commit $SHA is not on main (compare status: $status)"; exit 1 ;;
+          esac
+
+      # build-push-action silently drops lines without a value and CSV-parses quotes; fail early instead.
+      - name: Validate build secrets
+        env:
+          BUILD_SECRETS: ${{ secrets.build-secrets }}
+        run: |
+          set -euo pipefail
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [[ -z "$line" ]] && continue
+            if [[ ! "$line" =~ ^[A-Za-z0-9_.-]+=.+$ || "$line" == *'"'* ]]; then
+              echo "::error::build-secrets line $n must be id=value with a non-empty value and no double quotes"
+              exit 1
+            fi
+          done <<< "$BUILD_SECRETS"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - if: steps.plan.outputs.mode != 'pr'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Repo-defined commands (Dockerfile RUN) only ever run in this job, which has no id-token.
+      - name: Build (pull request, no push)
+        if: steps.plan.outputs.mode == 'pr'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ steps.plan.outputs.context }}
+          file: ${{ steps.plan.outputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ steps.plan.outputs.build-args }}
+          secrets: ${{ secrets.build-secrets }}
+          provenance: false
+          sbom: false
+          outputs: type=cacheonly
+          cache-from: ${{ steps.plan.outputs.cache-from }}
+          cache-to: ${{ steps.plan.outputs.cache-to }}
+
+      - name: Build and push
+        id: push
+        if: steps.plan.outputs.mode != 'pr'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.plan.outputs.epoch }}
+        with:
+          context: ${{ steps.plan.outputs.context }}
+          file: ${{ steps.plan.outputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ steps.plan.outputs.build-args }}
+          secrets: ${{ secrets.build-secrets }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.tag }},push=true,rewrite-timestamp=true,oci-mediatypes=true
+          no-cache: ${{ steps.plan.outputs.mode == 'release' }}
+          cache-from: ${{ steps.plan.outputs.cache-from }}
+          cache-to: ${{ steps.plan.outputs.cache-to }}
+
+  scan:
+    needs: build
+    if: needs.build.outputs.mode != 'pr'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      sbom-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sbom-sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.74.0
+          # A cached binary could be planted by any workflow on main; always download.
+          cache: false
+
+      # The attested SBOM describes linux/amd64; the CVE gate covers every platform.
+      - name: SBOM (CycloneDX, linux/amd64)
+        env:
+          REF: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: trivy image --platform linux/amd64 --format cyclonedx --output sbom.cdx.json "$REF"
+
+      - name: CVE gate (CRITICAL, fixed)
+        env:
+          REF: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          IFS=, read -ra platforms <<< "$PLATFORMS"
+          for platform in "${platforms[@]}"; do
+            echo "::group::$platform"
+            trivy image --platform "$platform" --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$REF"
+            echo "::endgroup::"
+          done
+
+      - id: hash
+        run: echo "sha256=$(sha256sum sbom.cdx.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ inputs.app }}
+          path: sbom.cdx.json
+          if-no-files-found: error
+
+  # Fixed steps only: no checkout, no repo-defined commands.
+  attest:
+    needs: [build, scan]
+    if: needs.build.outputs.mode != 'pr' && needs.scan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # By id, not name: a caller job could overwrite an artifact with the same name.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.scan.outputs.sbom-artifact-id }}
+
+      - name: Check SBOM hash
+        env:
+          EXPECTED: ${{ needs.scan.outputs.sbom-sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::missing SBOM hash"; exit 1; }
+          echo "$EXPECTED  sbom.cdx.json" | sha256sum --check --strict
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ needs.build.outputs.image }}
+          subject-digest: ${{ needs.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ needs.build.outputs.image }}
+          subject-digest: ${{ needs.build.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Summary
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ### Attested image
+
+          \`$IMAGE@$DIGEST\`
+
+          \`\`\`sh
+          gh attestation verify oci://$IMAGE@$DIGEST \\
+            --repo $REPO \\
+            --signer-workflow stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml \\
+            --signer-digest <approved platform sha> \\
+            --source-ref $REF \\
+            --predicate-type https://slsa.dev/provenance/v1
+          \`\`\`
+
+          Repeat with \`--predicate-type https://cyclonedx.org/bom\` for the SBOM.
+          EOF
