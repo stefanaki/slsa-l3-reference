@@ -1,6 +1,6 @@
 # SPEC: SLSA Build L3 Reference (GitHub Artifact Attestations)
 
-Status: **agreed design, not yet implemented**
+Status: **implemented** (2026-10-05). Deviations found during implementation are folded into the sections below; outcomes are in §15.
 Owner: @stefanaki
 Repo: `github.com/stefanaki/slsa-l3-reference` (**public**; local checkout: `~/dev/artifact-attestation`)
 Deploy target: homelab cluster **kabu**, GitOps repo `stefanaki/lab` (private), branch `kabu`
@@ -9,7 +9,7 @@ Deploy target: homelab cluster **kabu**, GitOps repo `stefanaki/lab` (private), 
 
 ## 1. Goal
 
-A single public repo that demonstrates **SLSA v1.0 Build Level 3** provenance with GitHub Artifact Attestations, close to a real production setup:
+A single public repo that demonstrates **SLSA v1.0 Build Level 3** provenance (GitHub's wording; the Build L3 requirements are unchanged in substance in the current SLSA v1.2) with GitHub Artifact Attestations, close to a real production setup:
 
 - An **org-level build platform** (reusable workflows) that builds, scans, generates SBOMs and attests.
 - **Project-level callers** (one per app) that only choose *what* to build, never *how*.
@@ -42,7 +42,7 @@ Key rules:
    ```yaml
    uses: stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<40-hex-sha> # platform/v1.2.0
    ```
-   `platform/vX.Y.Z` tags are human-readable release labels. Renovate bumps the SHA and the comment.
+   `platform/vX.Y.Z` tags are human-readable release labels. The owner bumps the SHA and the comment in a PR (§8.1: Renovate is configured but its app is not installed).
 2. **Signer identity = the platform workflow at that SHA.** The Sigstore certificate SAN is
    `https://github.com/stefanaki/slsa-l3-reference/.github/workflows/platform-docker.yml@<sha>`.
    GitHub resolves the SHA, so the build can't forge it.
@@ -62,7 +62,7 @@ slsa-l3-reference/
 ├── README.md                            # what this is, quickstart, links to docs
 ├── .github/
 │   ├── CODEOWNERS                       # .github/workflows/platform-*.yml → @stefanaki
-│   ├── renovate.json
+│   ├── renovate.json                    # ready for the Renovate app (not installed, §8.1)
 │   └── workflows/
 │       ├── platform-docker.yml          # reusable: Dockerfile/BuildKit image build platform
 │       ├── platform-go.yml              # reusable: Go binary build platform
@@ -72,24 +72,35 @@ slsa-l3-reference/
 │       └── negative-test.yml            # workflow_dispatch: produces images that MUST be rejected
 ├── apps/
 │   ├── orders-api/                      # .NET 10 ASP.NET Core minimal API
-│   │   ├── Dockerfile
+│   │   ├── README.md                    # local build/test, NUGET_TOKEN
+│   │   ├── Dockerfile / .dockerignore
+│   │   ├── global.json                  # SDK pin (§13.2)
+│   │   ├── Directory.Build.props / Directory.Packages.props   # shared settings, central package versions
+│   │   ├── OrdersApi.slnx
 │   │   ├── nuget.config
 │   │   ├── src/OrdersApi/…
 │   │   └── tests/OrdersApi.Tests/…
 │   └── inventory/                       # Go CLI
+│       ├── README.md
+│       ├── build.sh                     # the exact go build flags of §6.2, for local reproduction
 │       ├── go.mod / go.sum
 │       ├── main.go
+│       ├── internal/catalog/…
 │       └── *_test.go
 ├── policy/
 │   ├── verify-orders-api.yaml           # source of truth for the Kyverno policy (deployed copy lives in stefanaki/lab)
-│   └── tests/                           # `kyverno test` suite, incl. allowlist-negative case
+│   └── tests/                           # `kyverno test` suite
+│       ├── release/                     # real policy against the release, main and negative images
+│       ├── allowlist-negative/          # same policy with the real platform SHA removed (§7.1)
+│       └── reasons.sh                   # checks each rejection message
 ├── scripts/
 │   └── verify.sh                        # strict `gh attestation verify` examples (image + blobs)
 └── docs/
     ├── architecture.md                  # trust boundaries, flow diagram
     ├── slsa-l3-mapping.md               # each SLSA Build L3 requirement → where it's met
     ├── verification.md                  # gh CLI + Kyverno, how to read a cert/attestation
-    ├── rulesets.md                      # rulesets/settings to configure by hand
+    ├── rulesets.md                      # rulesets and settings, step by step
+    ├── rulesets/                        # main.json, tags-apps.json, tags-platform.json (applied with `gh api`)
     ├── environments.md                  # extending to dev/prod namespaces with per-ref rules
     └── prod-delta.md                    # GHEC private repos, GitHub Sigstore instance, separate platform repo
 ```
@@ -109,11 +120,12 @@ slsa-l3-reference/
   - `publish`: `dotnet publish -c Release`.
   - `runtime`: `mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled@sha256:…`.
 - **Simulated private feed:** `nuget.config` adds the owner's GitHub Packages NuGet feed (`https://nuget.pkg.github.com/stefanaki/index.json`) next to nuget.org. It's authenticated by a dedicated **read-only** credential (repo secret `NUGET_READ_TOKEN`: classic PAT with only `read:packages`), passed to the platform in `build-secrets` as `nuget_token`. Not the caller's `GITHUB_TOKEN`: the Dockerfile's `RUN` steps are untrusted (§2 rule 6) and must not see a token with `packages: write` or `attestations: write`. The feed hosts no packages.
+  - `packageSourceMapping` (required with Central Package Management, NU1507) sends `Stefanaki.*` only to the GitHub feed and everything else only to nuget.org, which is also the dependency-confusion defence. No `Stefanaki.*` package is referenced, so restore never contacts the feed: the secret mount is passed, required and leak-checked, but the token is never sent.
   - Local restores need `NUGET_TOKEN=$(gh auth token)`. Documented in `apps/orders-api/README.md`.
-- All base images are pinned by digest (Renovate keeps them current).
+- All base images are pinned by digest. Bumps are manual PRs (§8.1).
 
 ### 4.2 `inventory` (Go, binary build type)
-- A small CLI (e.g. `inventory list`, `inventory version`) with one or two real module dependencies, so the SBOM has content.
+- A small CLI (e.g. `inventory list`, `inventory version`) with one or two real module dependencies, so the SBOM should have content (it doesn't yet, see §6.2).
 - Unit tests via `go test`.
 - **Never deployed.** Released as binaries only.
 
@@ -171,9 +183,12 @@ Any other trigger, or a release tag whose commit isn't a PR merge commit on `mai
    - A failed gate means the image is pushed but **never attested**, so admission rejects it. This is intended and documented.
 3. **`attest`** (`needs: [build, scan]`): `id-token: write`, `attestations: write`, `packages: write`, `contents: read`.
    - **Fixed steps only.** No checkout of app code, no repo-defined commands.
-   - `actions/attest-build-provenance`: subject = image + digest, `push-to-registry: true`.
-   - `actions/attest-sbom`: same subject, `sbom-path: sbom.cdx.json`, `push-to-registry: true`.
-   - Job summary prints the image digest and a ready-to-run `gh attestation verify` command.
+   - Logs in to ghcr.io (`push-to-registry` needs registry credentials).
+   - `actions/attest` (v4.2.2, the unified action; `attest-sbom` is deprecated upstream), twice, both with subject = image + digest, `push-to-registry: true` and `create-storage-record: false` (storage records are org-only):
+     - provenance (`https://slsa.dev/provenance/v1`);
+     - SBOM with `sbom-path: sbom.cdx.json` (`https://cyclonedx.org/bom`), after checking the downloaded file against the sha256 the `scan` job output.
+   - Job summary prints the image digest and a `gh attestation verify` command. It still shows `--signer-workflow`, not the strict §10 form; fixing it needs a new platform release (deferred). Use `scripts/verify.sh`.
+   - The attested SBOM describes the `linux/amd64` image only (Trivy scans one platform per run); the CRITICAL CVE gate runs on every platform.
 
 ---
 
@@ -201,10 +216,13 @@ Same event matrix as §5.1: PRs only build, `main` attests and uploads workflow 
    - Output `<app>_<os>_<arch>` binaries plus `checksums.txt` (artifact upload).
 2. **`scan`**: `trivy rootfs` over the binaries → CycloneDX `sbom.cdx.json`, plus the same CRITICAL CVE gate.
 3. **`attest`**: `id-token: write`, `attestations: write`, `contents: read`. Fixed steps only.
-   - `attest-build-provenance` with `subject-path` over all binaries: one attestation, many subjects.
-   - `attest-sbom` over the same subjects.
+   - Downloads the binaries, `checksums.txt` and `sbom.cdx.json` and checks them against the sha256 values output by `build` and `scan`.
+   - `actions/attest` (v4.2.2, as §5.2) with `subject-path` over all binaries: one provenance attestation, many subjects.
+   - `actions/attest` with `sbom-path: sbom.cdx.json` over the same subjects.
+   - **Known gap (found in task 15):** the artifact upload/download (zip) round trip drops the exec bit, and Trivy's Go-binary analyzer skips non-executable files. So `scan` in `platform/v1.0.0` produces an SBOM with 0 components (the attested `apps/inventory/v1.0.0` SBOM is empty), and the CRITICAL CVE gate checks nothing. Fix: `chmod +x` the binaries before Trivy, in a new platform release.
+   - Job summary has the same `--signer-workflow` caveat as §5.2.
 4. **`release`** (tags only): `contents: write`. **No `id-token`.**
-   - Create the GitHub Release for `apps/<app>/vX.Y.Z` once: as a draft, upload the binaries, `checksums.txt` and `sbom.cdx.json`, then publish. A tag that already has a published release fails the job, and the job checks the release's asset names and sha256 digests against the attested files before and after publishing. The platform never changes published assets; only immutable releases (§8.2, optional) also stop others from changing them.
+   - Create the GitHub Release for `apps/<app>/vX.Y.Z` once: as a draft, upload the binaries, `checksums.txt` and `sbom.cdx.json`, then publish. A tag that already has a published release fails the job, and the job checks the release's asset names and sha256 digests against the attested files before and after publishing. The platform never changes published assets; immutable releases (§8.2, enabled) also stop others from changing them.
 
 ---
 
@@ -264,21 +282,21 @@ Instead, the allowlist is proven in the Kyverno test suite (`policy/tests`). The
 ## 8. Supply-chain hygiene
 
 ### 8.1 Renovate (`.github/renovate.json`)
-Renovate GitHub App on this public repo.
+The config is ready for the Renovate GitHub App, but **the app is not installed** (owner decision, task 15). Until it is, the owner makes these bumps by hand in a PR. Once installed, the config does the following:
 - `github-actions`: pin all actions by digest, plus bump the **platform self-references** (`stefanaki/slsa-l3-reference/...@<sha> # platform/vX.Y.Z`) when a new `platform/v*` tag appears.
 - `dockerfile`: digest-pinned `FROM`s.
 - `nuget` (lookups restricted to nuget.org via `registryUrls`; the simulated private feed has no packages and no Renovate credentials), `gomod`.
 - Group the platform bump separately so it's reviewed on its own.
 
-### 8.2 Rulesets and settings (documented in `docs/rulesets.md`; configured by hand)
+### 8.2 Rulesets and settings (`docs/rulesets.md`; rulesets kept as JSON in `docs/rulesets/` and applied with `gh api`)
 1. **`main`:** require a PR with **0 required approvals**, allowed merge methods **merge commit and squash** (rebase merging disabled, also in the repo settings), require status checks (the projects' `test` jobs and the platform PR-mode builds) with **branches up to date before merging**, block force pushes and deletion. With up-to-date branches, the merge or squash commit has the same tree the checks ran on. Merge commits also bring the PR's untested intermediate commits into `main`'s history, so the platform only releases PR merge commits (§2 rule 7). Rebase merging would put each rebased commit directly on `main`, so it stays off.
    - Rulesets match required checks by name only, so check names are unique per app: `test (<app>)` and `release (<app>) / build` (the platform's PR-mode build).
    - Required checks and `paths` filters interact: a PR that doesn't trigger a workflow never reports its check, and the PR stays blocked. So callers have **no `paths` filter on `pull_request`**: every PR runs every app's `test` job and platform PR build. `push` to `main` keeps its `paths` filter; tag pushes ignore `paths` filters.
    - CODEOWNERS documents platform ownership but isn't enforced: a solo maintainer can't approve their own PR.
    - `rulesets.md` explains that a real org requires CODEOWNERS review by a second person.
-2. **`apps/*/v*` tags:** restrict creation, update and deletion to the owner. This controls who can cut a release that admission will accept.
-3. **`platform/v*` tags:** restrict creation, update and deletion. Good practice; security doesn't depend on it, because admission checks the SHA.
-4. Optional, if available: require actions to be pinned to a full SHA (repo Actions setting), and immutable releases (a repository-wide setting, so it covers `platform/v*` and `apps/*/v*` releases alike).
+2. **`apps/*/v*` tags:** restrict creation, update and deletion; the only bypass is the **repository admin role** (actor_id 5), which today means only the owner. Any future admin could cut releases too. This controls who can cut a release that admission will accept.
+3. **`platform/v*` tags:** restrict creation, update and deletion, same bypass. Good practice; security doesn't depend on it, because admission checks the SHA.
+4. Both settings are available on a personal public repo and are **on**: require actions to be pinned to a full SHA (`sha_pinning_required`), and immutable releases (a repository-wide setting, so it covers `platform/v*` and `apps/*/v*` releases alike).
 
 ### 8.3 Platform release → allowlist flow
 1. Platform change merged to `main` via a reviewed PR.
@@ -286,8 +304,8 @@ Renovate GitHub App on this public repo.
 3. `platform-release.yml` runs and writes to the job summary:
    - the tag, the commit SHA,
    - the exact allowlist entry to add to `stefanaki/lab`.
-4. Owner adds the entry in `stefanaki/lab` (PR → merge → Flux applies).
-5. Renovate opens PRs in this repo that bump the callers to the new SHA.
+4. Owner adds the entry in `stefanaki/lab` (a direct commit on branch `kabu`, which Flux applies; that is how every lab change in this project was made).
+5. Owner opens a PR in this repo that bumps the callers to the new SHA (Renovate would do this once installed, §8.1).
 
 ### 8.4 Change flow
 - Until the `main` ruleset exists (implementation task 08), commits go directly to `main`.
@@ -307,11 +325,11 @@ Follow `.claude/skills/kabu-dev` conventions in that repo:
 - Pod Security `restricted` labels on namespaces;
 - validate with `kubectl kustomize`.
 
-**Nothing in `stefanaki/lab` is changed until the homelab phase is approved.**
+Every change in `stefanaki/lab` needs the owner's explicit approval and lands as a direct commit on `kabu`.
 
 Cluster facts: single Talos node, **amd64**, Kubernetes v1.36, Flux v2.9, Cilium Gateway API.
 
-Kyverno 1.19.x is tested upstream on Kubernetes v1.33–v1.35 only. Running it on kabu (v1.36) is an accepted deviation, to revisit when Kyverno 1.20 ships.
+Kyverno 1.19.x is tested upstream on Kubernetes v1.33–v1.35 only. Running it on kabu (v1.36) is an accepted deviation, to revisit when Kyverno 1.20 ships (not released as of 2026-10-05; latest is v1.19.1).
 
 ### 9.1 Layout
 ```
@@ -432,14 +450,17 @@ Inspect BuildKit's unsigned records: `docker buildx imagetools inspect <image> -
 
 ## 12. Implementation phases
 
+All phases are done (tasks 01–15).
+
 | # | Phase | Output | Gate |
 |---|---|---|---|
 | 1 | Scaffold and apps | `apps/orders-api`, `apps/inventory`, tests, Dockerfile; buildable locally (Docker) | builds and tests pass |
-| 2 | Platform and callers | `platform-docker.yml`, `platform-go.yml`, `platform-release.yml`, callers, CODEOWNERS, Renovate | **confirm before creating the public GitHub repo and pushing** |
+| 2 | Platform and callers | `platform-docker.yml`, `platform-go.yml`, `platform-release.yml`, callers, CODEOWNERS, Renovate config | **confirm before creating the public GitHub repo and pushing** |
 | 3 | First releases | rulesets configured (manual), `platform/v1.0.0`, `apps/orders-api/v1.0.0`, `apps/inventory/v1.0.0` | `scripts/verify.sh` passes |
 | 4 | Negative tests | `negative-test.yml`, negative cases in `verify.sh` | all negatives fail verification |
 | 5 | Homelab | Kyverno, policy, orders-api manifests on branch `kabu` | **explicit approval before touching `~/homelab/lab`**; §9.4 passes |
 | 6 | Docs | `docs/*`, README | review |
+| 7 | End-to-end acceptance | `apps/orders-api/v1.0.1` released and deployed; this SPEC reconciled | all checks in §15 pass; owner reviews the SPEC diff |
 
 ---
 
@@ -466,7 +487,7 @@ Not used: `cosign` (`gh attestation verify` covers it), `act` (it can't get GitH
 
 ### 13.2 Version alignment with CI
 - `apps/inventory/go.mod`: `go 1.27`. CI uses `actions/setup-go` with `go-version-file`.
-- `apps/orders-api`: `global.json` pins SDK `10.0.x` with `rollForward: latestFeature`. The Dockerfile SDK image tag is `10.0`, digest-pinned.
+- `apps/orders-api`: `global.json` pins SDK `10.0.100` with `rollForward: latestFeature` (any 10.0 feature band; `10.0.x` isn't a valid value). The Dockerfile SDK image tag is `10.0`, digest-pinned.
 - Trivy version in CI is pinned to the same minor as local (0.74) to keep SBOM output comparable.
 - Kyverno chart for kabu: pick the chart release that ships Kyverno **1.19.x**, to match the CLI used for offline policy tests.
 
@@ -478,9 +499,39 @@ Not used: `cosign` (`gh attestation verify` covers it), `act` (it can't get GitH
 
 ## 14. To verify during implementation (not design decisions)
 
-1. Kyverno `SigstoreBundle` finds GHCR-stored bundles (OCI referrers or tag-schema fallback) for `attest-build-provenance` / `attest-sbom` with `push-to-registry`. **Resolved (task 11):** yes; GHCR has no referrers API, and Kyverno reads the `sha256-<digest>` fallback tag.
+1. Kyverno `SigstoreBundle` finds GHCR-stored bundles (OCI referrers or tag-schema fallback) for `actions/attest` with `push-to-registry`. **Resolved (task 11):** yes; GHCR has no referrers API, and Kyverno reads the `sha256-<digest>` fallback tag.
 2. Kyverno keyless attestor subject matching works against the exact SAN with `@<sha>`. Using **multiple attestor entries** as the allowlist is the default design. If Kyverno supports variables there, an allowlist ConfigMap is a possible refinement. **If signer-SHA matching isn't possible in Kyverno at all, stop and consult the owner** (fallback: tag-ref policy plus a scheduled `gh attestation verify --signer-digest` audit). **Resolved (task 11):** exact SAN match works; one attestor per approved SHA.
 3. JMESPath / wildcard support for the `workflow.ref` condition. **Resolved (task 11):** CEL `startsWith('refs/tags/apps/orders-api/v')`.
 4. `ImageValidatingPolicy` vs `ClusterPolicy` in Kyverno 1.19.x. **Resolved (task 11):** `ImageValidatingPolicy`.
-5. GitHub Packages NuGet feed restore with the read-only `NUGET_READ_TOKEN` (classic PAT, `read:packages`) passed via `build-secrets` (§4.1); the feed is not contacted while it hosts no packages.
-6. Availability of "require SHA-pinned actions" and immutable releases on a personal public repo.
+5. GitHub Packages NuGet feed restore with the read-only `NUGET_READ_TOKEN` (classic PAT, `read:packages`) passed via `build-secrets` (§4.1); the feed is not contacted while it hosts no packages. **Resolved (task 02):** `packageSourceMapping` keeps every package except `Stefanaki.*` on nuget.org, so the feed is never contacted. The secret mount is passed, required and leak-checked (0 hits in layers, history, metadata or provenance).
+6. Availability of "require SHA-pinned actions" and immutable releases on a personal public repo. **Resolved (task 07):** both are available and on (§8.2 item 4).
+
+---
+
+## 15. Outcomes
+
+Releases, all built by `platform/v1.0.0` (`78c2b42`, the only allowlisted signer), all tagged on PR merge commits on `main`:
+
+| Tag | Commit | Artifact |
+|---|---|---|
+| `platform/v1.0.0` | `78c2b42` | allowlist entry for `platform-docker.yml@78c2b42…` / `platform-go.yml@78c2b42…` |
+| `apps/orders-api/v1.0.0` | `b328a8b` | `orders-api:1.0.0@sha256:71a23e7c…` |
+| `apps/inventory/v1.0.0` | `b328a8b` | 4 binaries + `checksums.txt` + `sbom.cdx.json` (immutable GitHub Release) |
+| `apps/orders-api/v1.0.1` | `acb34c2` | `orders-api:1.0.1@sha256:38f42fc2…`, running on kabu |
+
+End-to-end acceptance (task 15, 2026-10-05). Path: tag → release run (build / scan / attest green) → `verify.sh` → manual digest bump on `kabu` → Flux → Kyverno admits.
+- `kubectl -n slsa-l3-reference get deploy orders-api`: `orders-api:1.0.1@sha256:38f42fc2…`. The pod's `imageID` has the same digest, and `https://orders-slsa.gstefan.net/version` returns `1.0.1`.
+- `scripts/verify.sh orders-api 1.0.1` and `orders-api 1.0.0` pass with 4 checks each, `inventory 1.0.0` passes with 8, and `negatives f464254` passes with 12 (each negative rejected).
+- `kyverno test policy/tests`: 10 passed, 0 failed. `policy/tests/reasons.sh` passes.
+- Server dry-runs in `slsa-sandbox`:
+  - `unsigned` is denied with `no attestation: …`;
+  - `self-attested` is denied with `signer: …`;
+  - `orders-api:1.0.1` given by tag only is mutated to `@sha256:38f42fc2…`.
+
+Known limits that remain:
+- The attested image SBOM covers `linux/amd64` only (§5.2).
+- The platform job summaries print `--signer-workflow` hints (§5.2).
+- Ephemeral containers are not checked (§9.3).
+- The tag-ruleset bypass is the admin role (§8.2).
+- Renovate is not installed (§8.1).
+- The Go SBOM is empty and the Go CVE gate scans nothing (§6.2).

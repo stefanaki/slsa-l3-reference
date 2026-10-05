@@ -87,7 +87,7 @@ was reviewed or tested, or that dependencies are trustworthy. This repository ad
 ## Known gaps
 
 - **The attested image SBOM describes `linux/amd64` only.** The CVE gate covers every platform; the SBOM
-  doesn't. The Go SBOM covers all four binaries. [`architecture.md`](architecture.md#known-limits) lists the remaining limits.
+  doesn't. The Go SBOM is empty today: Trivy skips the binaries because the artifact upload/download (zip) round trip drops their exec bit. [`architecture.md`](architecture.md#known-limits) lists the remaining limits.
 - **The Go build is reproducible; the image build is only close to it.** The Go build is: two clean
   builds give identical checksums. The image build sets `SOURCE_DATE_EPOCH` and
   `rewrite-timestamp=true`, but package restores fetch from the network. SLSA Build L3 doesn't require

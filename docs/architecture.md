@@ -112,8 +112,11 @@ pin a bare tag, but the manifest carries the digest so Git records exactly what 
 
 - **The attested image SBOM covers `linux/amd64` only.** Trivy scans one platform per run. The CRITICAL CVE
   gate runs for every platform in the image, but the CycloneDX SBOM that `platform-docker.yml` attests
-  describes `linux/amd64`. (`platform-go.yml`'s SBOM covers all four binaries.) That's why `platforms` must include `linux/amd64`. BuildKit's own unsigned SBOM, inside
+  describes `linux/amd64`. That's why `platforms` must include `linux/amd64`. BuildKit's own unsigned SBOM, inside
   the image index, covers each platform.
+- **The Go SBOM is empty, and the Go CVE gate scans nothing.** The artifact upload/download (zip) round trip drops the exec bit, and
+  Trivy's Go-binary analyzer skips non-executable files, so `platform/v1.0.0`'s `scan` job finds 0 components.
+  The fix (`chmod +x` before Trivy) needs a new platform release.
 - **Ephemeral containers aren't checked.** Kyverno generates rules for Deployments, Jobs and the other
   pod controllers only when the policy matches `pods` alone, so the `pods/ephemeralcontainers`
   subresource (`kubectl debug`) is left out. It needs RBAC only cluster admins have here.
