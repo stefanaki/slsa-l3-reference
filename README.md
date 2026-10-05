@@ -57,6 +57,7 @@ policy/tests/reasons.sh
 |---|---|
 | `platform/v1.0.0` | `78c2b4251876144f5fc346f843c313efbaac745b` (the allowlisted signer) |
 | `apps/orders-api/v1.0.0` | `orders-api:1.0.0@sha256:71a23e7ccda289f58b2835d0ed9ec898b7a5a56f4f7f5929d2eafee145c3432c` |
+| `apps/orders-api/v1.0.1` | `orders-api:1.0.1@sha256:38f42fc22b4cb1a24caacd345923f4864655d4a03cb97bee74c48c11353ebb92` (running on kabu) |
 | `apps/inventory/v1.0.0` | GitHub Release with 4 binaries, `checksums.txt`, `sbom.cdx.json` |
 
 ## Docs
